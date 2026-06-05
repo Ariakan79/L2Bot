@@ -2139,7 +2139,7 @@ function destroyInvItem(objectId, maxCount) {
   const it = s().inventory.find(i => i.objectId === objectId);
   const name = it ? (ITEM_NAMES[it.itemId] || 'Item ' + it.itemId) : 'Item';
   if (maxCount > 1) {
-    const input = prompt(`"${name}" unwiderruflich löschen (${maxCount} vorhanden).\nAnzahl (leer = abbrechen):`, '1');
+    const input = prompt(`"${name}" unwiderruflich löschen (${maxCount} vorhanden).\nAnzahl (leer = abbrechen):`, String(maxCount));
     if (!input) return;
     const n = Math.min(Math.max(1, parseInt(input) || 1), maxCount);
     sendCmd({ cmd: 'destroyItem', objectId, count: n });
