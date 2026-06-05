@@ -288,12 +288,12 @@ class Bot extends EventEmitter {
     });
 
     this.gc.on('npcAppear', npc => {
-      const wasDead = this._deadNpcIds.has(npc.objectId);
-      if (wasDead) this._deadNpcIds.delete(npc.objectId); // new spawn supersedes dead status
+      // Ignore server re-broadcasts of a corpse's NpcInfo (triggered by nearby social NPCs moving).
+      // objectDisappear and the 5s auto-expire timer handle cleanup when the corpse actually despawns.
+      if (this._deadNpcIds.has(npc.objectId)) return;
       this._nearbyNpcs.set(npc.objectId, npc);
       this._emitNpcs();
-      // Don't auto-target on the same tick a mob "un-died" — avoids re-targeting corpse NpcInfo
-      if (!wasDead && this.state === STATE.FARMING && npc.attackable) this._pickTarget();
+      if (this.state === STATE.FARMING && npc.attackable) this._pickTarget();
     });
 
     this.gc.on('objectDisappear', id => {
