@@ -223,7 +223,12 @@ input[type=number] { -moz-appearance: textfield; }
 .inv-filter-row { display:flex; gap:3px; flex-wrap:wrap; align-items:center; margin-bottom:6px; }
 .inv-filter-row button.active { border-color:#e94560; color:#e94560; }
 
-/* Accounts tab */
+/* Accounts slide-panel (below sessionBar, above sub-tabs) */
+#accountsPanel { background:#0d1829; border-bottom:2px solid #1a3060; flex-shrink:0; overflow:hidden; max-height:0; transition:max-height .25s ease; }
+#accountsPanel.open { max-height:440px; overflow-y:auto; }
+#accountsPanel .acct-inner { padding:10px 14px; max-width:960px; }
+.accts-toggle { background:none; border:1px solid #1a3460; color:#7ab; border-radius:4px; padding:3px 10px; font-size:11px; cursor:pointer; align-self:center; flex-shrink:0; transition:all .15s; }
+.accts-toggle:hover, .accts-toggle.active { color:#c6f; border-color:#c6f; }
 .acct-card { background:#16213e; border:1px solid #0f3460; border-radius:6px; padding:10px 12px; margin-bottom:8px; }
 .acct-header { display:flex; align-items:center; gap:8px; }
 .acct-dot { width:8px; height:8px; border-radius:50%; background:#3a4a5a; flex-shrink:0; }
@@ -519,12 +524,23 @@ input[type=number] { -moz-appearance: textfield; }
 
 <div id="sessionBar">
   <div id="sessionTabs"></div>
-  <button class="sess-add" onclick="addSession()" title="Neuen Account hinzufügen (max 16)">＋ Account</button>
+  <button class="accts-toggle" id="btnAccountsPanel" onclick="toggleAccountsPanel()" title="Gespeicherte Accounts verwalten">👤 Accounts <span id="acctCount"></span></button>
+  <button class="sess-add" onclick="addSession()" title="Neuen Account hinzufügen (max 16)">＋ Session</button>
+</div>
+
+<div id="accountsPanel">
+  <div class="acct-inner">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <span style="font-size:12px;font-weight:700;color:#c6f">Gespeicherte Accounts</span>
+      <button class="btn-green btn-sm" onclick="relogAll()">▶ Alle einloggen</button>
+      <span style="margin-left:auto;font-size:10px;color:#444">Zugangsdaten im Browser-Cookie (30 Tage)</span>
+    </div>
+    <div id="savedAccountList"><em style="color:#555;font-size:12px">Keine gespeicherten Accounts — logge dich ein und wähle einen Charakter.</em></div>
+  </div>
 </div>
 
 <div class="tabs">
   <div class="tab active" data-tab="login">Login</div>
-  <div class="tab" data-tab="accounts"  id="tabAccounts">Accounts</div>
   <div class="tab" data-tab="map"       id="tabMap">Karte</div>
   <div class="tab" data-tab="bot"       id="tabBot">Bot</div>
   <div class="tab" data-tab="party"     id="tabParty">Party</div>
@@ -578,20 +594,6 @@ input[type=number] { -moz-appearance: textfield; }
 </div>
 
 <!-- ACCOUNTS -->
-<div class="pane" id="pane-accounts">
-  <div class="content" style="max-width:700px;margin:0 auto">
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
-      <span style="font-size:13px;font-weight:700;color:#c6f">Gespeicherte Accounts</span>
-      <span id="acctCount" style="font-size:11px;color:#666"></span>
-      <button class="btn-green btn-sm" style="margin-left:auto" onclick="relogAll()">▶ Alle einloggen</button>
-    </div>
-    <div id="savedAccountList"><em style="color:#555;font-size:12px">Keine gespeicherten Accounts — logge dich ein und wähle einen Charakter.</em></div>
-    <div style="margin-top:14px;font-size:10px;color:#444;line-height:1.6">
-      Zugangsdaten werden als Cookie im Browser gespeichert (30 Tage). Beim Einloggen und Charakter-Auswahl werden sie automatisch aktualisiert.
-    </div>
-  </div>
-</div>
-
 <!-- MAP -->
 <div class="pane" id="pane-map">
   <div id="mapToolbar">
@@ -1106,9 +1108,6 @@ input[type=number] { -moz-appearance: textfield; }
   <button class="mnav-btn active" id="mnav-login"     onclick="switchMobileTab('login')">
     <span class="mnav-icon">🔑</span>Login
   </button>
-  <button class="mnav-btn"        id="mnav-accounts"  onclick="switchMobileTab('accounts')">
-    <span class="mnav-icon">👤</span>Accounts
-  </button>
   <button class="mnav-btn"        id="mnav-map"       onclick="switchMobileTab('map')">
     <span class="mnav-icon">🗺</span>Karte
   </button>
@@ -1221,6 +1220,7 @@ function renderSavedAccounts() {
   const cnt = document.getElementById('acctCount');
   if (!el) return;
   if (cnt) cnt.textContent = list.length ? `(${list.length})` : '';
+  if (cnt) cnt.style.cssText = 'font-size:10px;color:#a8f;margin-left:2px';
   if (!list.length) {
     el.innerHTML = '<em style="color:#555;font-size:12px">Keine gespeicherten Accounts — logge dich ein und wähle einen Charakter.</em>';
     return;
@@ -1269,6 +1269,12 @@ function forgetAccount(i) {
 function _triggerNextAutoSession() {
   if (_autoLoginQueue.length === 0 || sessions.size >= 16) return;
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ cmd: 'newSession' }));
+}
+function toggleAccountsPanel() {
+  const panel = document.getElementById('accountsPanel');
+  const open = panel.classList.toggle('open');
+  document.getElementById('btnAccountsPanel').classList.toggle('active', open);
+  if (open) renderSavedAccounts();
 }
 function relogAll() {
   const list = _loadCookieAccounts();
@@ -3820,8 +3826,6 @@ function switchTab(name) {
     renderSkillsPaneSkills();
   } else if (name === 'party') {
     renderPartyTab();
-  } else if (name === 'accounts') {
-    renderSavedAccounts();
   }
   if (name === 'map' || name === 'bot') resizeCanvas();
 }
