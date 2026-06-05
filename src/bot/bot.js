@@ -697,12 +697,13 @@ class Bot extends EventEmitter {
       }
       // Remove from NPC map immediately so _pickTarget() can't select the corpse.
       // _deadNpcIds suppresses server re-broadcasts of the corpse's NpcInfo until DeleteObject.
-      // Auto-expire after 5s: covers missed DeleteObject packets and ObjectId reuse by the server.
+      // Auto-expire after 10s: covers missed DeleteObject packets and ObjectId reuse by the server.
+      // 10s > typical corpse decay (7-15s), so normal mobs despawn before the timer fires.
       this._deadNpcIds.add(id);
       const deadTimer = setTimeout(() => {
         this._deadNpcIds.delete(id);
         this._deadNpcTimers.delete(id);
-      }, 5000);
+      }, 10000);
       this._deadNpcTimers.set(id, deadTimer);
       if (id === this._assistCurrentNpcId) {
         this._assistCurrentNpcId = null;
