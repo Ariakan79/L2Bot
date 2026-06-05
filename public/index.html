@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>L2 Bot – High Five</title>
+<link rel="icon" href="data:,">
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
@@ -177,9 +178,9 @@ input[type=number] { -moz-appearance: textfield; }
 
 /* Active effects (buffs) */
 .effect-list { display:flex; flex-wrap:wrap; gap:3px; margin-top:4px; }
-.effect-pill { background:#0f2840; border:1px solid #1a4a7a; border-radius:10px; padding:2px 7px; font-size:10px; white-space:nowrap; display:flex; align-items:center; gap:3px; }
-.effect-pill .ep-name { color:#b0d8ff; }
-.effect-pill .ep-dur  { color:#557799; }
+.effect-pill { background:#0f2840; border:1px solid #1a4a7a; border-radius:10px; padding:2px 7px; font-size:10px; white-space:nowrap; display:flex; align-items:center; gap:3px; max-width:140px; }
+.effect-pill .ep-name { color:#b0d8ff; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.effect-pill .ep-dur  { color:#557799; flex-shrink:0; }
 .effect-pill.perm .ep-dur { color:#336; }
 #botMapSlot   { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; }
 #botRight     { width:430px; flex-shrink:0; overflow:hidden; display:flex; flex-direction:row; gap:8px; min-height:0; }
@@ -217,7 +218,7 @@ input[type=number] { -moz-appearance: textfield; }
 .inv-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:3px; }
 .inv-item { display:flex; align-items:flex-start; background:#0f1e36; border-radius:4px; padding:4px 6px; border-left:3px solid #0f3460; gap:4px; }
 .inv-item.equipped { border-left-color:#6af; }
-.inv-item-info { flex:1; font-size:11px; min-width:0; word-break:break-word; }
+.inv-item-info { flex:1; font-size:11px; min-width:0; overflow-wrap:break-word; }
 .inv-item-btns { display:flex; gap:2px; flex-shrink:0; }
 .inv-filter-row { display:flex; gap:3px; flex-wrap:wrap; align-items:center; margin-bottom:6px; }
 .inv-filter-row button.active { border-color:#e94560; color:#e94560; }
@@ -501,7 +502,7 @@ input[type=number] { -moz-appearance: textfield; }
   <h1>⚔ L2 Bot</h1>
   <div id="connStatus">Getrennt</div>
   <div class="header-btns">
-    <button class="btn-orange" id="btnLogout" onclick="doLogout()" title="Vom Spielserver trennen">Ausloggen</button>
+    <button class="btn-orange btn-sm" id="btnLogout" onclick="doLogout()" title="Vom Spielserver trennen">Ausloggen</button>
     <button class="btn-red btn-sm" onclick="doShutdown()" title="Bot-Server beenden">Beenden</button>
   </div>
 </header>
@@ -531,6 +532,7 @@ input[type=number] { -moz-appearance: textfield; }
 
     <!-- Login form -->
     <div id="loginSection">
+      <form onsubmit="event.preventDefault();document.getElementById('btnLogin').click()">
       <div style="margin-bottom:6px">
         <div class="label">Server</div>
         <div class="login-field-row">
@@ -541,11 +543,12 @@ input[type=number] { -moz-appearance: textfield; }
       <div style="margin-bottom:10px">
         <div class="label">Account</div>
         <div class="login-field-row">
-          <input id="username" placeholder="Benutzername">
-          <input id="password" type="password" placeholder="Passwort">
+          <input id="username" placeholder="Benutzername" autocomplete="username">
+          <input id="password" type="password" placeholder="Passwort" autocomplete="current-password">
         </div>
       </div>
       <button class="btn-primary" id="btnLogin" style="padding:5px 20px">Einloggen</button>
+      </form>
     </div>
 
     <!-- Char selection (shown after login) -->
@@ -555,6 +558,9 @@ input[type=number] { -moz-appearance: textfield; }
         <button class="btn-outline btn-sm" onclick="doLogout()">← Logout</button>
       </div>
       <div id="charList"><em style="color:#555">Warte auf Charakterliste…</em></div>
+      <div id="charInGameNote" style="display:none;margin-top:12px;font-size:11px;color:#556;padding:8px;background:#0a1428;border-radius:4px">
+        Im Spiel — wechsle zum <span style="color:#aaa;cursor:pointer" onclick="switchTab('bot')">Bot-Tab</span> um den Charakter zu steuern.
+      </div>
     </div>
 
   </div>
@@ -879,7 +885,7 @@ input[type=number] { -moz-appearance: textfield; }
         <!-- Support -->
         <div class="card">
           <h3>Support</h3>
-          <div id="supportTarget"><em style="font-size:11px">RK-Klick auf Karte</em></div>
+          <div id="supportTarget"><em style="font-size:11px;color:#556">Kein Ziel – auf Karte rechtsklicken</em></div>
           <div style="margin-top:6px">
             <div class="label">Follow-Dist</div>
             <input id="followDist" type="number" value="150" min="50">
@@ -1766,6 +1772,8 @@ function updateTabs() {
   // Toggle login / char sections
   document.getElementById('loginSection').style.display = hasChars ? 'none' : '';
   document.getElementById('charSection').style.display  = hasChars ? '' : 'none';
+  const inGameNote = document.getElementById('charInGameNote');
+  if (inGameNote) inGameNote.style.display = inGame ? '' : 'none';
   const m = {disconnected:'Getrennt',logging_in:'Einloggen…',connecting_game:'Verbinde…',char_select:'Char-Auswahl',in_game:'Im Spiel'};
   document.getElementById('connStatus').textContent = m[phase] || phase;
   document.getElementById('connStatus').className = inGame ? 'connected' : (phase==='disconnected' ? 'error' : '');
@@ -1927,7 +1935,6 @@ function renderEffects(effects) {
 
   list.innerHTML = effects.map(e => {
     const name = SKILL_NAMES[e.skillId] || ('Skill ' + e.skillId);
-    const shortName = name.length > 16 ? name.slice(0, 14) + '…' : name;
     const perm = e.duration < 0;
     const id = 'ep_' + e.skillId;
     if (!perm) {
@@ -1935,7 +1942,7 @@ function renderEffects(effects) {
     }
     const durText = perm ? '∞' : fmtDur(e.duration);
     return '<div class="effect-pill' + (perm ? ' perm' : '') + '" title="' + name + ' (ID ' + e.skillId + ')">'
-      + '<span class="ep-name">' + shortName + '</span>'
+      + '<span class="ep-name">' + escHtml(name) + '</span>'
       + '<span class="ep-dur" id="' + id + '">' + durText + '</span>'
       + '</div>';
   }).join('');
@@ -2008,12 +2015,24 @@ function npcName(n) {
 // ===== NPC list (Bot tab + Map tab right panel) =====
 function updateNpcList(list) {
   document.getElementById('npcCount').textContent = list.length;
-  const sorted = list.slice().sort((a, b) => npcName(a).localeCompare(npcName(b)));
-  document.getElementById('npcList').innerHTML = sorted.slice(0,30).map(n => {
+  // Group by name + attackable flag
+  const groups = new Map();
+  list.forEach(n => {
     const name = npcName(n);
-    const hpStr = (n.maxHp>0&&n.hp!==undefined) ? ` ${Math.round((n.hp/n.maxHp)*100)}%` : '';
-    return `<div class="npc-item ${n.attackable?'attackable':''}">
-      <span title="ObjID:${n.objectId}">${n.attackable?'⚔':'●'} ${name}</span>
+    const key = name + '|' + n.attackable;
+    if (!groups.has(key)) groups.set(key, { name, attackable: n.attackable, count: 0, hp: [], maxHp: [] });
+    const g = groups.get(key);
+    g.count++;
+    if (n.maxHp > 0 && n.hp !== undefined) { g.hp.push(n.hp); g.maxHp.push(n.maxHp); }
+  });
+  const sorted = [...groups.values()].sort((a, b) => a.name.localeCompare(b.name));
+  document.getElementById('npcList').innerHTML = sorted.slice(0, 30).map(g => {
+    const avgHp = g.hp.length ? Math.round(g.hp.reduce((s,v)=>s+v,0) / g.hp.length) : 0;
+    const avgMaxHp = g.maxHp.length ? Math.round(g.maxHp.reduce((s,v)=>s+v,0) / g.maxHp.length) : 0;
+    const hpStr = avgMaxHp > 0 ? ` ${Math.round((avgHp/avgMaxHp)*100)}%` : '';
+    const cntStr = g.count > 1 ? ` ×${g.count}` : '';
+    return `<div class="npc-item ${g.attackable?'attackable':''}">
+      <span>${g.attackable?'⚔':'●'} ${escHtml(g.name)}${cntStr}</span>
       <span>${hpStr}</span></div>`;
   }).join('');
   // Also update map right panel
@@ -2105,13 +2124,17 @@ function renderInventory() {
     const countStr = it.count > 1 ? `<span style="color:#aaa"> ×${fmtNum(it.count)}</span>` : '';
     const eqBadge = it.equipped ? `<span style="color:#6af;font-size:10px;margin-left:4px">[AN]</span>` : '';
     const isEquipable = it.bodyPart !== 0;
+    const isAdena = it.itemId === 57;
     const btnLabel = isEquipable ? (it.equipped ? 'Ablegen' : 'Anlegen') : 'Benutzen';
+    const useBtn = (!isAdena)
+      ? `<button class="btn-outline btn-sm" onclick="useInvItem(${it.objectId})">${btnLabel}</button>`
+      : '';
     return `<div class="inv-item${it.equipped ? ' equipped' : ''}">
       <div class="inv-item-info" title="ID:${it.itemId} ObjID:${it.objectId}">${enchStr}${escHtml(name)}${countStr}${eqBadge}</div>
       <div class="inv-item-btns">
-        <button class="btn-outline btn-sm" onclick="useInvItem(${it.objectId})">${btnLabel}</button>
-        <button class="btn-red btn-sm" onclick="dropInvItem(${it.objectId},${it.count})">Drop</button>
-        <button class="btn-orange btn-sm" onclick="destroyInvItem(${it.objectId},${it.count})">Löschen</button>
+        ${useBtn}
+        <button class="btn-orange btn-sm" onclick="dropInvItem(${it.objectId},${it.count})">Drop</button>
+        <button class="btn-red btn-sm" onclick="destroyInvItem(${it.objectId},${it.count})">Löschen</button>
       </div>
     </div>`;
   }).join('') + '</div>';
@@ -2259,8 +2282,8 @@ function renderSkillAssignList() {
           <span style="color:#888;min-width:14px;flex-shrink:0">${i+1}.</span>
           <span class="sa-name" style="color:${nameColor}">${escHtml(name)}</span>
           ${modeBtn}
-          <button class="btn-outline btn-sm" onclick="moveAttackSkill(${i},-1)" ${i===0?'disabled':''}>↑</button>
-          <button class="btn-outline btn-sm" onclick="moveAttackSkill(${i},1)" ${i===list.length-1?'disabled':''}>↓</button>
+          ${list.length > 1 ? `<button class="btn-outline btn-sm" onclick="moveAttackSkill(${i},-1)" ${i===0?'disabled':''}>↑</button>
+          <button class="btn-outline btn-sm" onclick="moveAttackSkill(${i},1)" ${i===list.length-1?'disabled':''}>↓</button>` : ''}
           <button class="btn-red btn-sm" onclick="removeAttackSkill(${i})">✕</button>
         </div>`;
       }).join('') + addAutoBtn;
@@ -2470,8 +2493,9 @@ function renderHealRules() {
     const sec = 'healrule_' + i;
     const isActive = _partySection === sec;
     const skillName = r.skillId ? (SKILL_NAMES[r.skillId] || 'Skill ' + r.skillId) : '– kein –';
+    const hasSkill = !!r.skillId;
     return `<div class="party-section-card${isActive ? ' active' : ''}" onclick="setPartySection('${sec}',this)" style="display:flex;gap:3px;align-items:center;margin-bottom:3px;padding:4px 6px">
-      <span style="flex:1;font-size:11px;color:#6af;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(skillName)}</span>
+      <span style="flex:1;font-size:11px;color:${hasSkill?'#6af':'#555'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(skillName)}</span>
       <span style="font-size:10px;color:#888">HP&lt;</span>
       <input type="number" value="${r.maxHpPct}" min="1" max="99" style="width:38px" onclick="event.stopPropagation()" onchange="updateHealRuleThreshold(${i},+this.value)">
       <span style="font-size:10px;color:#888">%</span>
@@ -2513,7 +2537,7 @@ function _renderBuffList(buffs, removeFn, changeFn) {
     const name = SKILL_NAMES[b.skillId] || b.label || ('Skill ' + b.skillId);
     const mins = Math.round(b.intervalMs / 60000 * 10) / 10;
     const rem = b.lastCast ? Math.max(0, Math.round((b.intervalMs - (now - b.lastCast)) / 1000)) : null;
-    const cdTxt = rem !== null ? `<span style="font-size:10px;color:#888">${rem}s</span>` : `<span style="font-size:10px;color:#4a8">bereit</span>`;
+    const cdTxt = rem !== null ? `<span style="font-size:10px;color:#888">${fmtDur(rem)}</span>` : `<span style="font-size:10px;color:#4a8">bereit</span>`;
     return `<div style="display:flex;gap:3px;align-items:center;margin-bottom:3px">
       <span style="flex:1;font-size:11px;color:#ff6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(name)}</span>
       <input type="number" value="${mins}" min="0.1" step="0.5" style="width:38px;text-align:right;font-size:11px"

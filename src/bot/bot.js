@@ -868,6 +868,7 @@ class Bot extends EventEmitter {
     const radius = ignoreZone ? this.config.farmRadius * 2 : this.config.farmRadius;
     for (const npc of this._nearbyNpcs.values()) {
       if (!npc.attackable) continue;
+      if (this._deadNpcIds.has(npc.objectId)) continue;
       if (zone) {
         if (npc.x < zone.x1 || npc.x > zone.x2 || npc.y < zone.y1 || npc.y > zone.y2) continue;
       } else {
@@ -1504,6 +1505,7 @@ class Bot extends EventEmitter {
 
   setConfig(cfg) {
     Object.assign(this.config, cfg);
+    if (cfg.debug !== undefined && this.gc) this.gc.debugMode = !!cfg.debug;
     if (cfg.mode === 'SUPPORT' && this.state === STATE.FARMING) {
       this._stopAttack();
       this.state = STATE.SUPPORT;

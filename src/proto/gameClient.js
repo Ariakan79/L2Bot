@@ -217,7 +217,7 @@ class GameClient extends EventEmitter {
       case 0x4D: break;  // compact entity info — silence
       case 0x79: break;  // formerly wrong ValidateLocation opcode — silence
       default:
-        this._log('Unhandled packet 0x' + opcode.toString(16).padStart(2,'0') + ' len=' + data.length);
+        if (this.debugMode) this._log('Unhandled packet 0x' + opcode.toString(16).padStart(2,'0') + ' len=' + data.length);
         break;
     }
   }
