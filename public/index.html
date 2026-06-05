@@ -1728,6 +1728,8 @@ function _connectWs() {
       break;
 
     case 'inventoryUpdate': {
+      const adenaBeforeItem = sess.inventory.find(i => i.itemId === 57);
+      const adenaBefore = adenaBeforeItem ? adenaBeforeItem.count : 0;
       for (const { change, item } of msg.updates) {
         if (change === 3 || item.count === 0) {
           sess.inventory = sess.inventory.filter(i => i.objectId !== item.objectId);
@@ -1741,9 +1743,20 @@ function _connectWs() {
         const adenaItem = sess.inventory.find(i => i.itemId === 57);
         if (adenaItem) sess.player.adena = adenaItem.count;
       }
-      // Note: adena rate tracking is handled exclusively via statEvent(item, itemId=57)
-      // from the GetItem packet — do not track here to avoid double-counting and
-      // false positives from NPC sales, quest rewards, etc.
+      // Track adena gains for rate calculation via inventory delta.
+      // GetItem packet is not sent for adena on this server, so inventoryUpdate
+      // is the only reliable source. Guard: adenaBefore > 0 avoids counting the
+      // initial adena load on login as a farming gain.
+      if (adenaBefore > 0) {
+        const adenaAfterItem = sess.inventory.find(i => i.itemId === 57);
+        const adenaAfter = adenaAfterItem ? adenaAfterItem.count : 0;
+        const delta = adenaAfter - adenaBefore;
+        if (delta > 0) {
+          sess._rateEvents.push({ ts: Date.now(), exp: 0, adena: delta, kills: 0 });
+          const cutoff = Date.now() - RATE_WINDOW_MS;
+          while (sess._rateEvents.length > 0 && sess._rateEvents[0].ts < cutoff) sess._rateEvents.shift();
+        }
+      }
       if (isActive) {
         renderInventory();
         // Refresh adena display in shop modal if open
@@ -3696,11 +3709,10 @@ function _appendStatEventToSess(sess, e) {
   // Rate tracking
   if (e.event === 'exp' && e.value > 0) {
     sess._rateEvents.push({ ts: Date.now(), exp: e.value, adena: 0, kills: 0 });
-  } else if (e.event === 'item' && e.itemId === 57 && e.count > 0) {
-    sess._rateEvents.push({ ts: Date.now(), exp: 0, adena: e.count, kills: 0 });
   } else if (e.event === 'kill') {
     sess._rateEvents.push({ ts: Date.now(), exp: 0, adena: 0, kills: 1 });
   }
+  // Adena is tracked via inventoryUpdate delta (GetItem not sent for adena on this server)
   // Prune entries older than 15 min
   const cutoff = Date.now() - 15 * 60 * 1000;
   while (sess._rateEvents.length > 0 && sess._rateEvents[0].ts < cutoff) sess._rateEvents.shift();
