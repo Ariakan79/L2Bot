@@ -223,6 +223,16 @@ input[type=number] { -moz-appearance: textfield; }
 .inv-filter-row { display:flex; gap:3px; flex-wrap:wrap; align-items:center; margin-bottom:6px; }
 .inv-filter-row button.active { border-color:#e94560; color:#e94560; }
 
+/* Accounts tab */
+.acct-card { background:#16213e; border:1px solid #0f3460; border-radius:6px; padding:10px 12px; margin-bottom:8px; }
+.acct-header { display:flex; align-items:center; gap:8px; }
+.acct-dot { width:8px; height:8px; border-radius:50%; background:#3a4a5a; flex-shrink:0; }
+.acct-dot.online { background:#44cc66; }
+.acct-charname { font-size:13px; font-weight:700; color:#c6f; }
+.acct-meta { font-size:10px; color:#666; margin-top:1px; }
+.acct-fields { display:grid; grid-template-columns:1fr 60px 1fr 1fr; gap:4px; margin-top:8px; }
+.acct-fields input { margin:0; }
+
 /* Death overlay */
 #deathBanner { display:none; background:rgba(120,0,0,.92); border:1px solid #cc3333; border-radius:6px; padding:8px 12px; margin-bottom:8px; }
 #deathBanner .db-title { font-size:13px; font-weight:700; color:#ff6666; margin-bottom:5px; }
@@ -514,6 +524,7 @@ input[type=number] { -moz-appearance: textfield; }
 
 <div class="tabs">
   <div class="tab active" data-tab="login">Login</div>
+  <div class="tab" data-tab="accounts"  id="tabAccounts">Accounts</div>
   <div class="tab" data-tab="map"       id="tabMap">Karte</div>
   <div class="tab" data-tab="bot"       id="tabBot">Bot</div>
   <div class="tab" data-tab="party"     id="tabParty">Party</div>
@@ -563,6 +574,21 @@ input[type=number] { -moz-appearance: textfield; }
       </div>
     </div>
 
+  </div>
+</div>
+
+<!-- ACCOUNTS -->
+<div class="pane" id="pane-accounts">
+  <div class="content" style="max-width:700px;margin:0 auto">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+      <span style="font-size:13px;font-weight:700;color:#c6f">Gespeicherte Accounts</span>
+      <span id="acctCount" style="font-size:11px;color:#666"></span>
+      <button class="btn-green btn-sm" style="margin-left:auto" onclick="relogAll()">▶ Alle einloggen</button>
+    </div>
+    <div id="savedAccountList"><em style="color:#555;font-size:12px">Keine gespeicherten Accounts — logge dich ein und wähle einen Charakter.</em></div>
+    <div style="margin-top:14px;font-size:10px;color:#444;line-height:1.6">
+      Zugangsdaten werden als Cookie im Browser gespeichert (30 Tage). Beim Einloggen und Charakter-Auswahl werden sie automatisch aktualisiert.
+    </div>
   </div>
 </div>
 
@@ -1080,6 +1106,9 @@ input[type=number] { -moz-appearance: textfield; }
   <button class="mnav-btn active" id="mnav-login"     onclick="switchMobileTab('login')">
     <span class="mnav-icon">🔑</span>Login
   </button>
+  <button class="mnav-btn"        id="mnav-accounts"  onclick="switchMobileTab('accounts')">
+    <span class="mnav-icon">👤</span>Accounts
+  </button>
   <button class="mnav-btn"        id="mnav-map"       onclick="switchMobileTab('map')">
     <span class="mnav-icon">🗺</span>Karte
   </button>
@@ -1162,6 +1191,97 @@ const ZONE_STYLE = {
   JailZone:   { fill:'rgba(80,80,80,0.25)',    stroke:'rgba(120,120,120,0.4)' },
   TaxZone:    { fill:'rgba(200,160,20,0.1)',   stroke:'rgba(200,160,20,0.2)' },
 };
+
+// ===== Saved accounts (cookie-based credential store) =====
+const _ACCT_COOKIE = 'l2bot_accounts';
+let _capturedCreds = {};          // sessionId → {host,port,username,password} — cleared after char select
+let _autoLoginQueue = [];         // [{host,port,username,password,slot,charName,...}] awaiting session
+const _sessionPendingSlot = new Map(); // sessionId → {slot} — auto-select after char_select
+
+function _saveCookieAccounts(accounts) {
+  const val = encodeURIComponent(JSON.stringify(accounts));
+  document.cookie = `${_ACCT_COOKIE}=${val};max-age=${30*86400};path=/;SameSite=Strict`;
+}
+function _loadCookieAccounts() {
+  const m = document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith(_ACCT_COOKIE+'='));
+  if (!m) return [];
+  try { return JSON.parse(decodeURIComponent(m.slice(_ACCT_COOKIE.length+1))); } catch(e) { return []; }
+}
+function _upsertSavedAccount(acct) {
+  const list = _loadCookieAccounts();
+  const idx = list.findIndex(a => a.host===acct.host && a.username===acct.username);
+  if (idx >= 0) list[idx] = { ...list[idx], ...acct };
+  else list.push(acct);
+  _saveCookieAccounts(list);
+}
+
+function renderSavedAccounts() {
+  const list = _loadCookieAccounts();
+  const el = document.getElementById('savedAccountList');
+  const cnt = document.getElementById('acctCount');
+  if (!el) return;
+  if (cnt) cnt.textContent = list.length ? `(${list.length})` : '';
+  if (!list.length) {
+    el.innerHTML = '<em style="color:#555;font-size:12px">Keine gespeicherten Accounts — logge dich ein und wähle einen Charakter.</em>';
+    return;
+  }
+  // Determine which accounts are currently online
+  const onlineUsers = new Set([...sessions.values()].map(s=>s.accountName).filter(Boolean));
+  el.innerHTML = list.map((acct, i) => {
+    const online = onlineUsers.has(acct.username);
+    return `<div class="acct-card">
+      <div class="acct-header">
+        <span class="acct-dot${online?' online':''}"></span>
+        <div style="flex:1;min-width:0">
+          <span class="acct-charname">${escHtml(acct.charName||'Unbekannt')}</span>
+          ${acct.charLevel ? `<span style="color:#e94560;font-size:11px;margin-left:5px">Lv ${acct.charLevel}</span>` : ''}
+          ${acct.charClass ? `<span style="color:#7ab;font-size:10px;margin-left:4px">${escHtml(acct.charClass)}</span>` : ''}
+          <div class="acct-meta">${escHtml(acct.username)} @ ${escHtml(acct.host)} · Slot ${acct.slot}${online ? ' · <span style="color:#44cc66">Im Spiel</span>' : ''}</div>
+        </div>
+        <button class="btn-green btn-sm" onclick="relogSingle(${i})">▶ Einloggen</button>
+        <button class="btn-red btn-sm" onclick="forgetAccount(${i})">✕</button>
+      </div>
+      <div class="acct-fields">
+        <input type="text"     value="${escHtml(acct.host)}"     placeholder="Host"     oninput="updateSavedAccount(${i},'host',this.value)">
+        <input type="number"   value="${acct.port||2106}"        placeholder="Port"     oninput="updateSavedAccount(${i},'port',+this.value)">
+        <input type="text"     value="${escHtml(acct.username)}" placeholder="Username" oninput="updateSavedAccount(${i},'username',this.value)" autocomplete="username">
+        <input type="password" value="${escHtml(acct.password)}" placeholder="Passwort" oninput="updateSavedAccount(${i},'password',this.value)" autocomplete="current-password">
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function updateSavedAccount(i, field, value) {
+  const list = _loadCookieAccounts();
+  if (!list[i]) return;
+  list[i][field] = value;
+  _saveCookieAccounts(list);
+}
+function forgetAccount(i) {
+  const list = _loadCookieAccounts();
+  const acct = list[i];
+  if (!acct) return;
+  if (!confirm(`Account "${acct.username}" (${acct.charName}) vergessen?`)) return;
+  list.splice(i, 1);
+  _saveCookieAccounts(list);
+  renderSavedAccounts();
+}
+function _triggerNextAutoSession() {
+  if (_autoLoginQueue.length === 0 || sessions.size >= 16) return;
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ cmd: 'newSession' }));
+}
+function relogAll() {
+  const list = _loadCookieAccounts();
+  if (!list.length) { alert('Keine gespeicherten Accounts.'); return; }
+  _autoLoginQueue = [...list];
+  _triggerNextAutoSession();
+}
+function relogSingle(i) {
+  const list = _loadCookieAccounts();
+  if (!list[i]) return;
+  _autoLoginQueue = [list[i]];
+  _triggerNextAutoSession();
+}
 
 // ===== Multi-session state =====
 const sessions = new Map();   // id → SessionData
@@ -1283,6 +1403,19 @@ function _connectWs() {
   if (msg.type === 'sessionCreated') {
     sessions.set(msg.sessionId, makeSessionData(msg.sessionId));
     switchSession(msg.sessionId);
+    // Auto-login: if a queued relog is waiting, fire it for this new session
+    if (_autoLoginQueue.length > 0) {
+      const acct = _autoLoginQueue.shift();
+      _capturedCreds[msg.sessionId] = acct; // so selectChar saves updated cookie
+      _sessionPendingSlot.set(msg.sessionId, { slot: acct.slot, charName: acct.charName });
+      setTimeout(() => {
+        if (ws && ws.readyState === 1)
+          ws.send(JSON.stringify({ sessionId: msg.sessionId, cmd:'login',
+            host: acct.host, loginPort: acct.port, username: acct.username, password: acct.password }));
+      }, 400);
+      // Stagger next session creation so they don't race each other
+      if (_autoLoginQueue.length > 0) setTimeout(_triggerNextAutoSession, 1200);
+    }
     return;
   }
   if (msg.type === 'sessionRemoved') {
@@ -1309,7 +1442,19 @@ function _connectWs() {
       renderSessionTabs();
       if (!isActive) break;
       updateTabs();
-      if (msg.phase === 'char_select') { renderCharList(sess.characters); switchTab('login'); }
+      if (msg.phase === 'char_select') {
+        renderCharList(sess.characters);
+        switchTab('login');
+        // Auto-relog: if this session has a pending slot, select it automatically
+        if (_sessionPendingSlot.has(msg.sessionId)) {
+          const { slot } = _sessionPendingSlot.get(msg.sessionId);
+          _sessionPendingSlot.delete(msg.sessionId);
+          setTimeout(() => {
+            if (ws && ws.readyState === 1)
+              ws.send(JSON.stringify({ sessionId: msg.sessionId, cmd:'selectChar', slot }));
+          }, 900);
+        }
+      }
       else if (msg.phase === 'in_game') switchTab('bot');
       else if (msg.phase === 'disconnected') {
         sess.npcs=[]; sess.npcById={}; sess.nearbyPlayers={}; sess.floorItems=[];
@@ -1808,8 +1953,24 @@ function renderCharList(chars) {
     </div>`;
   }).join('');
 }
-function createChar()    { sendCmd({cmd:'createChar',name:document.getElementById('newCharName')?.value||'TestBot',classId:0,sex:0}); }
-function selectChar(slot){ sendCmd({cmd:'selectChar',slot}); }
+function createChar() { sendCmd({cmd:'createChar',name:document.getElementById('newCharName')?.value||'TestBot',classId:0,sex:0}); }
+function selectChar(slot) {
+  const sess = s();
+  const char = (sess.characters || []).find(c => c.slot === slot);
+  const creds = _capturedCreds[activeSessionId];
+  if (char && creds) {
+    _upsertSavedAccount({
+      ...creds,
+      slot,
+      charName:  char.name  || ('Slot ' + slot),
+      charClass: CLASS_NAMES[char.classId] || '',
+      charLevel: char.level || 0,
+    });
+    delete _capturedCreds[activeSessionId];
+    renderSavedAccounts();
+  }
+  sendCmd({ cmd: 'selectChar', slot });
+}
 function fmt(v)          { return Math.round(v||0); }
 
 // EXP table: index = level, value = cumulative exp to reach that level (from server experience.xml)
@@ -3659,6 +3820,8 @@ function switchTab(name) {
     renderSkillsPaneSkills();
   } else if (name === 'party') {
     renderPartyTab();
+  } else if (name === 'accounts') {
+    renderSavedAccounts();
   }
   if (name === 'map' || name === 'bot') resizeCanvas();
 }
@@ -3666,12 +3829,14 @@ document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>swit
 
 // ===== Login =====
 document.getElementById('btnLogin').addEventListener('click',()=>{
-  sendCmd({cmd:'login',host:document.getElementById('host').value.trim(),
-    loginPort:parseInt(document.getElementById('loginPort').value),
-    username:document.getElementById('username').value.trim(),
-    password:document.getElementById('password').value});
-  document.getElementById('btnLogin').disabled=true;
-  setTimeout(()=>document.getElementById('btnLogin').disabled=false,5000);
+  const host = document.getElementById('host').value.trim();
+  const port = parseInt(document.getElementById('loginPort').value) || 2106;
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  _capturedCreds[activeSessionId] = { host, port, username, password };
+  sendCmd({ cmd:'login', host, loginPort: port, username, password });
+  document.getElementById('btnLogin').disabled = true;
+  setTimeout(()=>document.getElementById('btnLogin').disabled=false, 5000);
 });
 
 document.getElementById('btnStart').addEventListener('click',()=>{ applyConfig(); sendCmd({cmd:'botStart'}); });

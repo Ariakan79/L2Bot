@@ -215,10 +215,18 @@ wss.on('connection', ws => {
         doSelectChar(sess, msg.slot);
         break;
       case 'botStart':
-        if (bot) bot.start();
+        if (bot) {
+          bot.start();
+          const _cn = gameClient && gameClient.player && gameClient.player.name;
+          if (_cn) saveProfile(_cn, { autoFarm: true });
+        }
         break;
       case 'botStop':
-        if (bot) bot.stop();
+        if (bot) {
+          bot.stop();
+          const _cn = gameClient && gameClient.player && gameClient.player.name;
+          if (_cn) saveProfile(_cn, { autoFarm: false });
+        }
         break;
       case 'botConfig': {
         if (bot) {
@@ -679,6 +687,15 @@ function doSelectChar(sess, slot) {
         // Party auto-restore: if this char was party leader, re-invite saved members
         if (prof.wasPartyLeader && Array.isArray(prof.savedPartyMembers) && prof.savedPartyMembers.length > 0) {
           setTimeout(() => startPartyRestore(sess), 4000);
+        }
+        // Auto-farm: resume farming if it was active before the restart
+        if (prof.autoFarm && bot) {
+          setTimeout(() => {
+            if (bot && !bot.config.autoFarm) {
+              addLog(sess, 'Auto-Farm wird fortgesetzt (letzter Status)');
+              bot.start();
+            }
+          }, 6000);
         }
       }
     }
