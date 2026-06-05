@@ -1446,20 +1446,20 @@ function _connectWs() {
       sess.characters = msg.characters || [];
       if (msg.accountName) sess.accountName = msg.accountName;
       renderSessionTabs();
+      // Auto-relog slot selection must fire for all sessions, not just the active one
+      if (msg.phase === 'char_select' && _sessionPendingSlot.has(msg.sessionId)) {
+        const { slot } = _sessionPendingSlot.get(msg.sessionId);
+        _sessionPendingSlot.delete(msg.sessionId);
+        setTimeout(() => {
+          if (ws && ws.readyState === 1)
+            ws.send(JSON.stringify({ sessionId: msg.sessionId, cmd:'selectChar', slot }));
+        }, 900);
+      }
       if (!isActive) break;
       updateTabs();
       if (msg.phase === 'char_select') {
         renderCharList(sess.characters);
         switchTab('login');
-        // Auto-relog: if this session has a pending slot, select it automatically
-        if (_sessionPendingSlot.has(msg.sessionId)) {
-          const { slot } = _sessionPendingSlot.get(msg.sessionId);
-          _sessionPendingSlot.delete(msg.sessionId);
-          setTimeout(() => {
-            if (ws && ws.readyState === 1)
-              ws.send(JSON.stringify({ sessionId: msg.sessionId, cmd:'selectChar', slot }));
-          }, 900);
-        }
       }
       else if (msg.phase === 'in_game') switchTab('bot');
       else if (msg.phase === 'disconnected') {
