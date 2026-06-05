@@ -272,6 +272,9 @@ wss.on('connection', ws => {
       case 'dropItem':
         if (gameClient) gameClient.dropItem(msg.objectId, msg.count || 1);
         break;
+      case 'destroyItem':
+        if (gameClient) gameClient.destroyItem(msg.objectId, msg.count || 1);
+        break;
       case 'requestItemList':
         if (gameClient) gameClient.requestItemList();
         break;

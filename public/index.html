@@ -2111,6 +2111,7 @@ function renderInventory() {
       <div class="inv-item-btns">
         <button class="btn-outline btn-sm" onclick="useInvItem(${it.objectId})">${btnLabel}</button>
         <button class="btn-red btn-sm" onclick="dropInvItem(${it.objectId},${it.count})">Drop</button>
+        <button class="btn-orange btn-sm" onclick="destroyInvItem(${it.objectId},${it.count})">Löschen</button>
       </div>
     </div>`;
   }).join('') + '</div>';
@@ -2131,6 +2132,21 @@ function dropInvItem(objectId, maxCount) {
   } else {
     if (!confirm(`"${name}" droppen?`)) return;
     sendCmd({ cmd: 'dropItem', objectId, count: 1 });
+  }
+}
+
+function destroyInvItem(objectId, maxCount) {
+  const it = s().inventory.find(i => i.objectId === objectId);
+  const name = it ? (ITEM_NAMES[it.itemId] || 'Item ' + it.itemId) : 'Item';
+  if (maxCount > 1) {
+    const input = prompt(`"${name}" LÖSCHEN (${maxCount} vorhanden) — unwiderruflich!\nAnzahl:`, '1');
+    if (!input) return;
+    const n = Math.min(Math.max(1, parseInt(input) || 1), maxCount);
+    if (!confirm(`${n}× "${name}" unwiderruflich löschen?`)) return;
+    sendCmd({ cmd: 'destroyItem', objectId, count: n });
+  } else {
+    if (!confirm(`"${name}" unwiderruflich löschen?\nDiese Aktion kann nicht rückgängig gemacht werden.`)) return;
+    sendCmd({ cmd: 'destroyItem', objectId, count: 1 });
   }
 }
 

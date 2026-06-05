@@ -1038,6 +1038,16 @@ class GameClient extends EventEmitter {
     this._send(buf);
   }
 
+  destroyItem(objectId, count = 1) {
+    // RequestDestroyItem (CT2.6 HF opcode 0x1B): objectId(4) count(8L)
+    const buf = Buffer.alloc(13, 0);
+    buf[0] = 0x1B;
+    buf.writeInt32LE(objectId, 1);
+    buf.writeUInt32LE(count >>> 0, 5); // count lo
+    buf.writeUInt32LE(0, 9);           // count hi
+    this._send(buf);
+  }
+
   dropItem(objectId, count = 1) {
     // RequestDropItem: objectId(4) count(8l) x(4) y(4) z(4)
     const buf = Buffer.alloc(25, 0);
