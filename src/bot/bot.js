@@ -68,7 +68,8 @@ class Bot extends EventEmitter {
     this._nearbyNpcs = new Map();
     this._nearbyPlayers = new Map();
     this._floorItems = new Map();     // objectId → { objectId, itemId, x, y, z, count }
-    this._attackInterval = null;
+    this._attackPollInterval = null;  // setInterval — auto-attack 5s heartbeat
+    this._attackTimeout     = null;   // setTimeout  — skill-based next-cast scheduling
     this._selfBuffTimer = null;
     this._buffPending = null;   // { skillId, timer } — blocks next buff until cast completes
     this._supportTimer = null;
@@ -134,94 +135,14 @@ class Bot extends EventEmitter {
     this._bindEvents();
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // SETUP & EVENTS
+  // ═══════════════════════════════════════════════════════════
+
   _bindEvents() {
-    this.gc.on('playerStats', p => {
-      // Compute drops BEFORE storing new values. CP absorbs damage first; HP drops only after CP=0.
-      // Combining both gives the true damage received per StatusUpdate.
-      const hpDrop = (this._lastPlayerHp !== null && p.hp !== undefined)
-        ? this._lastPlayerHp - p.hp : 0;
-      const cpDrop = (this._lastPlayerCp !== null && p.cp !== undefined)
-        ? this._lastPlayerCp - p.cp : 0;
-      const totalDrop = (hpDrop > 0 ? hpDrop : 0) + (cpDrop > 0 ? cpDrop : 0);
-
-      if (totalDrop > 0) {
-        this._stats.dmgTaken += Math.round(totalDrop);
-        const attacker = this._target
-          ? (this._target.name || String(this._target.npcTypeId - 1000000))
-          : null;
-        this.emit('statEvent', { event: 'dmgTaken', value: Math.round(totalDrop), attacker });
-        this._lastCombatActivityAt = Date.now();
-      }
-      if (p.hp !== undefined) this._lastPlayerHp = p.hp;
-      if (p.cp !== undefined) this._lastPlayerCp = p.cp;
-
-      this.emit('status', this._status());
-      if (this.config.mode === 'FARM') {
-        if (this.config.autoHeal && this.state !== STATE.HEALING) {
-          const hpPct = p.maxHp > 0 ? (p.hp / p.maxHp) * 100 : 100;
-          if (hpPct < this._healTriggerPct()) this._doHeal();
-        }
-        // Resume farming when MP/HP recovers above farmMin thresholds (regen while waiting).
-        if (this.state === STATE.FARMING && !this._target) this._pickTarget();
-        // FightBack: react to any damage (HP or CP) while idle/looting.
-        // Uses totalDrop so CP-absorbed hits also trigger engagement.
-        // This is a fallback for when the attacker wasn't in the NPC map yet
-        // when the combatAttack packet arrived.
-        if (this.config.fightBack && totalDrop > 5 && !this._target &&
-            (this.state === STATE.IDLE || this.state === STATE.LOOTING || this.state === STATE.FARMING)) {
-          this._log('FightBack: Schaden erhalten während ' + this.state);
-          this._pickTarget(true); // ignoreZone: attacker may be outside farmZone
-        }
-      }
-    });
-
-    this.gc.on('playerInfo', (info) => {
-      const p = this.gc.player;
-      if (p) {
-        // Seed damage baseline from UserInfo so the very first combat hit is tracked correctly.
-        // Also re-sync after teleport/respawn so the post-heal HP is used as the new baseline.
-        if (p.hp !== undefined && (this._lastPlayerHp === null || (info && info.teleported))) {
-          this._lastPlayerHp = p.hp;
-        }
-        if (p.cp !== undefined && (this._lastPlayerCp === null || (info && info.teleported))) {
-          this._lastPlayerCp = p.cp;
-        }
-        // L2 server resets auto-shot registration on UserInfo (teleport/respawn/world-entry).
-        if (this.config.autoFarm && this.config.shotsEnabled && this.config.shotItemId)
-          this.gc.autoSoulShot(this.config.shotItemId, true);
-        if (p.exp !== undefined && this._lastExp !== null && p.exp > this._lastExp) {
-          const gain = Math.round(p.exp - this._lastExp);
-          this._stats.expGained += gain;
-          this.emit('statEvent', { event: 'exp', value: gain });
-        }
-        if (p.exp !== undefined) this._lastExp = p.exp;
-        if (p.sp !== undefined && this._lastSp !== null && p.sp > this._lastSp) {
-          const gain = p.sp - this._lastSp;
-          this._stats.spGained += gain;
-          this.emit('statEvent', { event: 'sp', value: gain });
-        }
-        if (p.sp !== undefined) this._lastSp = p.sp;
-        if (p.weaponItemId !== undefined && p.weaponItemId !== this._lastWeaponItemId) {
-          this._lastWeaponItemId = p.weaponItemId;
-          if (this.config.attackSkills.length === 0) {
-            // Auto-attack: derive engage range from weapon's physical reach.
-            // For skills the user configures attackRange directly (skill range >> melee range).
-            const pRange = getWeaponRange(p.weaponItemId);
-            this.config.attackRange = pRange + 40;
-            this._log('Waffe #' + p.weaponItemId + ' → pAtkRange=' + pRange + ' attackRange=' + this.config.attackRange);
-          }
-        }
-      }
-      this.emit('status', this._status());
-      if (info && info.teleported) {
-        // NpcInfo for the new zone can arrive before UserInfo. The UI clears its entity maps on
-        // teleported=true, so re-broadcast whatever the bot currently has so the map isn't left empty.
-        this._deadNpcIds.clear();
-        this._emitNpcs();
-        this.emit('floorItems', [...this._floorItems.values()]);
-      }
-    });
-    this.gc.on('playerMove', () => this.emit('status', this._status()));
+    this.gc.on('playerStats',        p          => this._onPlayerStats(p));
+    this.gc.on('playerInfo',         info       => this._onPlayerInfo(info));
+    this.gc.on('playerMove',         ()         => this.emit('status', this._status()));
 
     this.gc.on('teleport', () => {
       // Player is leaving the current zone. Clear all local entity caches immediately so
@@ -235,37 +156,8 @@ class Bot extends EventEmitter {
       this.emit('floorItems', []);
     });
 
-    this.gc.on('validateLocation', ({ x, y, z }) => {
-      if (this.state === STATE.COMBAT && this._target) {
-        const dist = Math.hypot(this._target.x - x, this._target.y - y);
-        if (dist > this.config.farmRadius) {
-          this._log('Positions-Korrektur – Ziel unerreichbar, zurück zu FARMING');
-          this._target = null;
-          this._stopAttack();
-          this._cancelWaypoints();
-          this.state = STATE.FARMING;
-          this.emit('status', this._status());
-          this._pickTarget();
-        }
-      }
-    });
-
-    this.gc.on('playerDied', opts => {
-      this._stopAttack();
-      this._cancelWaypoints();
-      this._target = null;
-      this.state = STATE.IDLE;
-      this.emit('status', this._status());
-      this.emit('playerDied', opts);
-      if (this.config.autoRespawn) {
-        this._log('Gestorben – Respawn in ' + this.config.autoRespawnDelay + 'ms');
-        if (this._respawnTimer) clearTimeout(this._respawnTimer);
-        this._respawnTimer = setTimeout(() => {
-          this._respawnTimer = null;
-          this.gc.requestRestartPoint(this.config.respawnType);
-        }, this.config.autoRespawnDelay);
-      }
-    });
+    this.gc.on('validateLocation',   args       => this._onValidateLocation(args));
+    this.gc.on('playerDied',         opts       => this._onPlayerDied(opts));
 
     this.gc.on('partyInvite', info => {
       this.emit('partyInvite', info);
@@ -301,255 +193,21 @@ class Bot extends EventEmitter {
 
     this.gc.on('npcAppear', npc => {
       // Ignore server re-broadcasts of a corpse's NpcInfo (triggered by nearby social NPCs moving).
-      // objectDisappear and the 5s auto-expire timer handle cleanup when the corpse actually despawns.
       if (this._deadNpcIds.has(npc.objectId)) return;
       this._nearbyNpcs.set(npc.objectId, npc);
       this._emitNpcs();
       if (this.state === STATE.FARMING && npc.attackable) this._pickTarget();
     });
 
-    this.gc.on('objectDisappear', id => {
-      this._deadNpcIds.delete(id);
-      this._spoiledNpcs.delete(id);
-      if (id === this._assistCurrentNpcId) {
-        this._assistCurrentNpcId = null;
-        if (this._assistAttacking) { this._target = null; this._stopAttack(); this._attackSkillIdx = 0; }
-      }
-      if (this._nearbyNpcs.has(id)) {
-        this._nearbyNpcs.delete(id);
-        this._emitNpcs();
-        // Safety: if this object was our target (e.g. die packet missed, or rare re-target race),
-        // clean up so the bot doesn't stay stuck in COMBAT with a ghost target.
-        if (this._target && this._target.objectId === id) {
-          this._target = null;
-          this._stopAttack();
-          this._cancelWaypoints();
-          if (this.state === STATE.COMBAT) {
-            // die packet was missed — do the LOOTING transition now as fallback
-            this.state = STATE.LOOTING;
-            this._lootPending.clear();
-            this.emit('status', this._status());
-            if (!this.config.autoPickup) {
-              this._resumeFromLoot();
-            } else {
-              this._lootQueue = [...this._floorItems.values()];
-              if (this._lootQueue.length === 0) {
-                this._resetLootFallback(200);
-              } else {
-                this._pickNextFromQueue();
-              }
-            }
-          }
-        }
-      }
-
-      if (this._nearbyPlayers.has(id)) {
-        this._nearbyPlayers.delete(id);
-        this.emit('playerDisappear', id);
-      }
-
-      if (this._floorItems.has(id)) {
-        const it = this._floorItems.get(id);
-        this._stats.itemsLooted++;
-        this.emit('statEvent', { event: 'item', itemId: it.itemId, count: it.count || 1 });
-        this._floorItems.delete(id);
-        this._lootPending.delete(id);
-        this._lootRetries.delete(id);
-        this.emit('floorItems', [...this._floorItems.values()]);
-        if (this.state === STATE.LOOTING && this._lootPending.size === 0) {
-          this._pickNextFromQueue();
-        }
-      }
-    });
-
-    this.gc.on('actionFailed', () => {
-      // Spoil ActionFailed: retry up to 4 times (covers movement race + brief cooldown overlap)
-      // before giving up and proceeding to attack without Spoil on this mob.
-      if (this.config.autoSpoil && this.config.spoilSkillId &&
-          this._castingSkillId === this.config.spoilSkillId && this._target && !this._castConfirmed) {
-        this._spoilFailCount++;
-        this._castingSkillId = null;
-        if (this._spoilFailCount >= 4) {
-          this._log('Spoil nach ' + this._spoilFailCount + ' Fehlern übersprungen für Mob #' + this._target.objectId);
-          this._spoiledNpcs.add(this._target.objectId);
-          this._spoilFailCount = 0;
-          this._scheduleNextAttack(500);
-        } else {
-          this._dbg('Spoil ActionFailed #' + this._spoilFailCount + ' → retry 800ms');
-          this._scheduleNextAttack(800);
-        }
-        return;
-      }
-      if (this.config.attackSkills.length > 0) {
-        if (this._isAttacking() && this._target) {
-          // Ignore queued ActionFailed that arrived after a cast was already confirmed by skillCastStart.
-          // These are stale responses from earlier useSkill spam that the server is draining.
-          if (this._castConfirmed) {
-            this._dbg('ActionFailed ignoriert (Cast bereits bestätigt)');
-            return;
-          }
-          this._actionFailedCount++;
-          this._dbg('ActionFailed (Skill) #' + this._actionFailedCount + ' → retry 1.5s');
-
-          // Too many consecutive failures → target is unreachable (dead, despawned, permanent desync).
-          if (this._actionFailedCount >= 15) {
-            this._log('Ziel ' + this._target.objectId + ' nach 15 Fehlern aufgegeben');
-            this._nearbyNpcs.delete(this._target.objectId);
-            this._target = null;
-            this._assistCurrentNpcId = null;
-            this._stopAttack();
-            this._cancelWaypoints();
-            if (this.state === STATE.COMBAT) {
-              this.state = STATE.FARMING;
-              this.emit('status', this._status());
-              this._pickTarget();
-            }
-            return;
-          }
-          // Every 3rd failure: position may be desynced — move closer even if stored dist looks OK.
-          if (this._actionFailedCount % 3 === 0) {
-            this._dbg('ActionFailed #' + this._actionFailedCount + ' → Positions-Desync? bewegen');
-            this.gc.selectTarget(this._target.objectId);
-            this._moveToTarget();
-          }
-          this._scheduleNextAttack(1500);
-        }
-        return;
-      }
-      // Auto-attack: ActionFailed usually means out of range.
-      if (this.state === STATE.COMBAT && this._target) {
-        const p = this.gc.player;
-        const dist = p ? Math.hypot(this._target.x - p.x, this._target.y - p.y) : Infinity;
-        this._dbg('ActionFailed (Auto-Attack) dist=' + Math.round(dist) + ' range=' + this.config.attackRange);
-        if (dist > this.config.attackRange) this._moveToTarget();
-      }
-    });
-
-    this.gc.on('playerAppear', p => {
-      this._nearbyPlayers.set(p.objectId, p);
-      this.emit('playerAppear', p);
-    });
-
-    this.gc.on('objectMove', upd => {
-      const pl = this._nearbyPlayers.get(upd.objectId);
-      if (pl) {
-        // Use destination when available — gives follow a head-start towards where the char is going.
-        const tx = upd.toX !== undefined ? upd.toX : upd.x;
-        const ty = upd.toY !== undefined ? upd.toY : upd.y;
-        const tz = upd.toZ !== undefined ? upd.toZ : (upd.z !== undefined ? upd.z : pl.z);
-        pl.x = tx; pl.y = ty; pl.z = tz;
-        // React immediately when our follow target moves rather than waiting up to 1s for the tick.
-        if (upd.objectId === this.config.followTargetId) this._followTick();
-      }
-      const npc = this._nearbyNpcs.get(upd.objectId);
-      if (npc) {
-        npc.x = upd.toX !== undefined ? upd.toX : upd.x;
-        npc.y = upd.toY !== undefined ? upd.toY : upd.y;
-        npc.z = upd.toZ !== undefined ? upd.toZ : (upd.z !== undefined ? upd.z : npc.z);
-      }
-    });
-
-    this.gc.on('combatAttack', ({ attackerObjectId, targetObjectId }) => {
-      const player = this.gc.player;
-
-      // Proactive FightBack: react on the attack packet, before the damage StatusUpdate arrives.
-      // This targets the specific attacker and fires one RTT earlier than the hpDrop fallback.
-      if (this.config.fightBack && this.config.autoFarm && this.config.mode === 'FARM' &&
-          player && targetObjectId === player.objectId && !this._target &&
-          (this.state === STATE.IDLE || this.state === STATE.LOOTING || this.state === STATE.FARMING)) {
-        const attacker = this._nearbyNpcs.get(attackerObjectId);
-        if (attacker && attacker.attackable) {
-          this._log('FightBack: Angriff von ' + (attacker.name || attackerObjectId));
-          if (this._lootFallback) { clearTimeout(this._lootFallback); this._lootFallback = null; }
-          this._lootQueue = [];
-          this._lootPending.clear();
-          this._target = attacker;
-          this.state = STATE.COMBAT;
-          this.emit('status', this._status());
-          this.gc.selectTarget(attacker.objectId);
-          const dist = Math.hypot(attacker.x - player.x, attacker.y - player.y);
-          if (dist > this.config.attackRange) this._moveToTarget();
-          this._startAttack();
-          return; // prevent assist check below from also firing
-        }
-        // Attacker not yet in NPC map — hpDrop-based fallback in playerStats will handle it
-      }
-
-      // Party-FightBack: if a party member is attacked, defend them.
-      if (this.config.fightBack && this.config.autoFarm && this.config.mode === 'FARM' &&
-          player && !this._target &&
-          (this.state === STATE.IDLE || this.state === STATE.FARMING || this.state === STATE.LOOTING)) {
-        const party = this.gc.party;
-        if (party && party.has(targetObjectId)) {
-          const attacker = this._nearbyNpcs.get(attackerObjectId);
-          if (attacker && attacker.attackable) {
-            const memberName = (party.get(targetObjectId) || {}).name || targetObjectId;
-            this._log('Party-FightBack: ' + (attacker.name || attackerObjectId) + ' greift ' + memberName + ' an');
-            if (this._lootFallback) { clearTimeout(this._lootFallback); this._lootFallback = null; }
-            this._lootQueue = [];
-            this._lootPending.clear();
-            this._target = attacker;
-            this.state = STATE.COMBAT;
-            this.emit('status', this._status());
-            this.gc.selectTarget(attacker.objectId);
-            const dist = Math.hypot(attacker.x - player.x, attacker.y - player.y);
-            if (dist > this.config.attackRange) this._moveToTarget();
-            this._startAttack();
-            return;
-          }
-        }
-      }
-
-      // Assist: track what the assist target is currently attacking.
-      // In FARM mode → enter combat immediately.
-      // In SUPPORT mode → stored in _assistCurrentNpcId; _supportTick() attacks as lowest priority.
-      if (!this.config.assistTargetId) return;
-      if (attackerObjectId !== this.config.assistTargetId) return;
-      const assistNpc = this._nearbyNpcs.get(targetObjectId);
-      if (!assistNpc || !assistNpc.attackable) return;
-      if (this.config.mode === 'SUPPORT') {
-        this._assistCurrentNpcId = targetObjectId;
-      } else if (this.state === STATE.IDLE || this.state === STATE.FARMING) {
-        this._target = assistNpc;
-        this.state = STATE.COMBAT;
-        this.gc.selectTarget(assistNpc.objectId);
-        this._startAttack();
-      }
-    });
-
-    // Assist pre-select: when the assist target selects an NPC, react immediately
-    // (fires ~1 RTT earlier than combatAttack).
-    this.gc.on('targetSelected', ({ objectId, targetObjId }) => {
-      if (!this.config.assistTargetId || objectId !== this.config.assistTargetId) return;
-      if (!targetObjId) return;
-      const npc = this._nearbyNpcs.get(targetObjId);
-      if (!npc || !npc.attackable) return;
-      if (this.config.mode === 'SUPPORT') {
-        // Set the assist target and run the tick immediately (respects heal/buff priority).
-        if (this._assistCurrentNpcId !== targetObjId) {
-          this._assistCurrentNpcId = targetObjId;
-          this._supportTick();
-        }
-      } else if (this.state === STATE.IDLE || this.state === STATE.FARMING) {
-        if (this._target && this._target.objectId === targetObjId) return;
-        this._target = npc;
-        this.state = STATE.COMBAT;
-        this.gc.selectTarget(npc.objectId);
-        this._startAttack();
-      }
-    });
-
-    this.gc.on('partyPositionUpdate', members => {
-      this.emit('partyPositionUpdate', members);
-    });
-
-    this.gc.on('partyMemberUpdate', upd => {
-      this.emit('partyMemberUpdate', upd);
-    });
-
-    this.gc.on('partyMemberEffects', ({ objectId, effects }) => {
-      this._partyMemberEffects.set(objectId, effects);
-    });
+    this.gc.on('objectDisappear',    id         => this._onObjectDisappear(id));
+    this.gc.on('actionFailed',       ()         => this._onActionFailed());
+    this.gc.on('playerAppear',       p          => { this._nearbyPlayers.set(p.objectId, p); this.emit('playerAppear', p); });
+    this.gc.on('objectMove',         upd        => this._onObjectMove(upd));
+    this.gc.on('combatAttack',       args       => this._onCombatAttack(args));
+    this.gc.on('targetSelected',     args       => this._onTargetSelected(args));
+    this.gc.on('partyPositionUpdate',members    => this.emit('partyPositionUpdate', members));
+    this.gc.on('partyMemberUpdate',  upd        => this.emit('partyMemberUpdate', upd));
+    this.gc.on('partyMemberEffects', ({ objectId, effects }) => this._partyMemberEffects.set(objectId, effects));
 
     this.gc.on('playerRelation', upd => {
       const pl = this._nearbyPlayers.get(upd.objectId);
@@ -560,133 +218,480 @@ class Bot extends EventEmitter {
       }
     });
 
-    this.gc.on('nearbyHpUpdate', upd => {
-      const npc = this._nearbyNpcs.get(upd.objectId);
-      if (npc) {
-        // Track damage dealt to current target.
-        if (this._target && upd.objectId === this._target.objectId && upd.hp !== undefined) {
-          let dmg = 0;
-          if (npc.hp !== undefined) {
-            // Normal case: we already have an HP baseline from a previous update.
-            dmg = Math.round(npc.hp - upd.hp);
-          } else if (upd.maxHp !== undefined) {
-            // First StatusUpdate for this NPC — maxHp arrived together with current HP.
-            // Use maxHp as the pre-combat baseline so the first hit is not lost.
-            dmg = Math.round(upd.maxHp - upd.hp);
-          }
-          if (dmg > 0) {
-            this._stats.dmgDealt += dmg;
-            this.emit('statEvent', { event: 'dmgDealt', value: dmg, target: npc.name || String(npc.npcTypeId - 1000000) });
-            this._lastCombatActivityAt = Date.now();
-          }
-        }
-        if (upd.hp !== undefined) npc.hp = upd.hp;
-        if (upd.maxHp !== undefined) npc.maxHp = upd.maxHp;
-        this.emit('npcHpUpdate', { objectId: upd.objectId, hp: npc.hp, maxHp: npc.maxHp });
-      }
-      const pl = this._nearbyPlayers.get(upd.objectId);
-      if (pl) {
-        if (upd.hp !== undefined) pl.hp = upd.hp;
-        if (upd.maxHp !== undefined) pl.maxHp = upd.maxHp;
-        this.emit('playerAppear', pl);
-      }
+    this.gc.on('nearbyHpUpdate',     upd        => this._onNearbyHpUpdate(upd));
+    this.gc.on('skillCastStart',     args       => this._onSkillCastStart(args));
+    this.gc.on('skillCastCanceled',  args       => this._onSkillCastCanceled(args));
+    this.gc.on('itemSpawn',          item       => this._onItemSpawn(item));
+    this.gc.on('die',                (id, sw)   => this._onDie(id, sw));
+    this.gc.on('sweepInfo',          args       => this._onSweepInfo(args));
+
+    this.gc.on('getItem', ({ itemId, count }) => {
+      this._stats.itemsLooted++;
+      this.emit('statEvent', { event: 'item', itemId, count: count || 1 });
+      this._log('Auto-Loot: Item #' + itemId + (count > 1 ? ' ×' + count : ''));
     });
+  }
 
-    this.gc.on('skillCastStart', ({ casterObjectId, skillId, hitTime, reuseDelay }) => {
-      const player = this.gc.player;
-      if (!player || casterObjectId !== player.objectId) return;
+  // ═══════════════════════════════════════════════════════════
+  // EVENT HANDLERS
+  // ═══════════════════════════════════════════════════════════
 
-      // Buff timing: server confirmed a buff cast — replace safety timeout with accurate hitTime
-      if (this._buffPending && this._buffPending.skillId === skillId) {
-        clearTimeout(this._buffPending.timer);
-        this._buffPending.timer = setTimeout(() => { this._buffPending = null; }, hitTime + 300);
-        return;
+  _onPlayerStats(p) {
+    // Compute drops BEFORE storing new values. CP absorbs damage first; HP drops only after CP=0.
+    // Combining both gives the true damage received per StatusUpdate.
+    const hpDrop = (this._lastPlayerHp !== null && p.hp !== undefined)
+      ? this._lastPlayerHp - p.hp : 0;
+    const cpDrop = (this._lastPlayerCp !== null && p.cp !== undefined)
+      ? this._lastPlayerCp - p.cp : 0;
+    const totalDrop = (hpDrop > 0 ? hpDrop : 0) + (cpDrop > 0 ? cpDrop : 0);
+
+    if (totalDrop > 0) {
+      this._stats.dmgTaken += Math.round(totalDrop);
+      const attacker = this._target
+        ? (this._target.name || String(this._target.npcTypeId - 1000000))
+        : null;
+      this.emit('statEvent', { event: 'dmgTaken', value: Math.round(totalDrop), attacker });
+      this._lastCombatActivityAt = Date.now();
+    }
+    if (p.hp !== undefined) this._lastPlayerHp = p.hp;
+    if (p.cp !== undefined) this._lastPlayerCp = p.cp;
+
+    this.emit('status', this._status());
+    if (this.config.mode === 'FARM') {
+      if (this.config.autoHeal && this.state !== STATE.HEALING) {
+        const hpPct = p.maxHp > 0 ? (p.hp / p.maxHp) * 100 : 100;
+        if (hpPct < this._healTriggerPct()) this._doHeal();
       }
+      // Resume farming when MP/HP recovers above farmMin thresholds (regen while waiting).
+      if (this.state === STATE.FARMING && !this._target) this._pickTarget();
+      // FightBack: react to any damage (HP or CP) while idle/looting.
+      // Uses totalDrop so CP-absorbed hits also trigger engagement.
+      // This is a fallback for when the attacker wasn't in the NPC map yet
+      // when the combatAttack packet arrived.
+      if (this.config.fightBack && totalDrop > 5 && !this._target &&
+          (this.state === STATE.IDLE || this.state === STATE.LOOTING || this.state === STATE.FARMING)) {
+        this._log('FightBack: Schaden erhalten während ' + this.state);
+        this._pickTarget(true); // ignoreZone: attacker may be outside farmZone
+      }
+    }
+  }
 
-      // Spoil confirmation: mark target as spoiled and proceed to attack rotation
-      if (this.config.autoSpoil && this.config.spoilSkillId && skillId === this.config.spoilSkillId) {
-        if (this._target) {
-          this._spoiledNpcs.add(this._target.objectId);
-          this._log('Spoil erfolgreich auf ' + (this._target.name || 'Mob #' + this._target.objectId) + ' – warte auf Angriff');
+  _onPlayerInfo(info) {
+    const p = this.gc.player;
+    if (p) {
+      // Seed damage baseline from UserInfo so the very first combat hit is tracked correctly.
+      // Also re-sync after teleport/respawn so the post-heal HP is used as the new baseline.
+      if (p.hp !== undefined && (this._lastPlayerHp === null || (info && info.teleported))) {
+        this._lastPlayerHp = p.hp;
+      }
+      if (p.cp !== undefined && (this._lastPlayerCp === null || (info && info.teleported))) {
+        this._lastPlayerCp = p.cp;
+      }
+      // L2 server resets auto-shot registration on UserInfo (teleport/respawn/world-entry).
+      if (this.config.autoFarm && this.config.shotsEnabled && this.config.shotItemId)
+        this.gc.autoSoulShot(this.config.shotItemId, true);
+      if (p.exp !== undefined && this._lastExp !== null && p.exp > this._lastExp) {
+        const gain = Math.round(p.exp - this._lastExp);
+        this._stats.expGained += gain;
+        this.emit('statEvent', { event: 'exp', value: gain });
+      }
+      if (p.exp !== undefined) this._lastExp = p.exp;
+      if (p.sp !== undefined && this._lastSp !== null && p.sp > this._lastSp) {
+        const gain = p.sp - this._lastSp;
+        this._stats.spGained += gain;
+        this.emit('statEvent', { event: 'sp', value: gain });
+      }
+      if (p.sp !== undefined) this._lastSp = p.sp;
+      if (p.weaponItemId !== undefined && p.weaponItemId !== this._lastWeaponItemId) {
+        this._lastWeaponItemId = p.weaponItemId;
+        if (this.config.attackSkills.length === 0) {
+          // Auto-attack: derive engage range from weapon's physical reach.
+          // For skills the user configures attackRange directly (skill range >> melee range).
+          const pRange = getWeaponRange(p.weaponItemId);
+          this.config.attackRange = pRange + 40;
+          this._log('Waffe #' + p.weaponItemId + ' → pAtkRange=' + pRange + ' attackRange=' + this.config.attackRange);
         }
-        this._castingSkillId = null;
-        this._castConfirmed = true;
-        this._actionFailedCount = 0;
-        this._spoilFailCount = 0;
-        // No reuse wait needed — we won't cast Spoil again on this mob; attack right after cast ends
-        this._dbg('skillCastStart Spoil#' + skillId + ' bestätigt → Angriff in ' + (hitTime + 100) + 'ms');
-        this._scheduleNextAttack(hitTime + 100);
-        return;
       }
+    }
+    this.emit('status', this._status());
+    if (info && info.teleported) {
+      // NpcInfo for the new zone can arrive before UserInfo. The UI clears its entity maps on
+      // teleported=true, so re-broadcast whatever the bot currently has so the map isn't left empty.
+      this._deadNpcIds.clear();
+      this._emitNpcs();
+      this.emit('floorItems', [...this._floorItems.values()]);
+    }
+  }
 
-      if (!this._isAttacking() || this.config.attackSkills.length === 0) return;
-
-      // Ignore skills that are NOT in our attack rotation (buffs, racials, auto-casts, etc.).
-      // If we let those update attackRange or reschedule the combat timer, a racial ability with
-      // castRange=40 will overwrite our ranged spell's 600+ WU range and break approach logic.
-      if (!this.config.attackSkills.includes(skillId)) {
-        this._dbg('skillCastStart ignoriert (kein Attack-Skill): ' + skillId);
-        return;
+  _onValidateLocation({ x, y, z }) {
+    if (this.state === STATE.COMBAT && this._target) {
+      const dist = Math.hypot(this._target.x - x, this._target.y - y);
+      if (dist > this.config.farmRadius) {
+        this._log('Positions-Korrektur – Ziel unerreichbar, zurück zu FARMING');
+        this._target = null;
+        this._stopAttack();
+        this._cancelWaypoints();
+        this.state = STATE.FARMING;
+        this.emit('status', this._status());
+        this._pickTarget();
       }
+    }
+  }
 
-      const castRange = getSkillRange(skillId);
-      if (this.config.attackRange !== castRange) {
-        this.config.attackRange = castRange;
-        this._log('Skill #' + skillId + ' → castRange=' + castRange);
+  _onPlayerDied(opts) {
+    this._stopAttack();
+    this._cancelWaypoints();
+    this._target = null;
+    this.state = STATE.IDLE;
+    this.emit('status', this._status());
+    this.emit('playerDied', opts);
+    if (this.config.autoRespawn) {
+      this._log('Gestorben – Respawn in ' + this.config.autoRespawnDelay + 'ms');
+      if (this._respawnTimer) clearTimeout(this._respawnTimer);
+      this._respawnTimer = setTimeout(() => {
+        this._respawnTimer = null;
+        this.gc.requestRestartPoint(this.config.respawnType);
+      }, this.config.autoRespawnDelay);
+    }
+  }
+
+  _onObjectDisappear(id) {
+    this._deadNpcIds.delete(id);
+    this._spoiledNpcs.delete(id);
+    if (id === this._assistCurrentNpcId) {
+      this._assistCurrentNpcId = null;
+      if (this._assistAttacking) { this._target = null; this._stopAttack(); this._attackSkillIdx = 0; }
+    }
+    if (this._nearbyNpcs.has(id)) {
+      this._nearbyNpcs.delete(id);
+      this._emitNpcs();
+      // Safety: if this object was our target (e.g. die packet missed, or rare re-target race),
+      // clean up so the bot doesn't stay stuck in COMBAT with a ghost target.
+      if (this._target && this._target.objectId === id) {
+        this._target = null;
+        this._stopAttack();
+        this._cancelWaypoints();
+        if (this.state === STATE.COMBAT) {
+          // die packet was missed — do the LOOTING transition now as fallback
+          this.state = STATE.LOOTING;
+          this._lootPending.clear();
+          this.emit('status', this._status());
+          if (!this.config.autoPickup) {
+            this._resumeFromLoot();
+          } else {
+            this._lootQueue = [...this._floorItems.values()];
+            if (this._lootQueue.length === 0) {
+              this._resetLootFallback(200);
+            } else {
+              this._pickNextFromQueue();
+            }
+          }
+        }
       }
-      // Cast confirmed — advance rotation, mark active, reset failure counter.
+    }
+
+    if (this._nearbyPlayers.has(id)) {
+      this._nearbyPlayers.delete(id);
+      this.emit('playerDisappear', id);
+    }
+
+    if (this._floorItems.has(id)) {
+      const it = this._floorItems.get(id);
+      this._stats.itemsLooted++;
+      this.emit('statEvent', { event: 'item', itemId: it.itemId, count: it.count || 1 });
+      this._floorItems.delete(id);
+      this._lootPending.delete(id);
+      this._lootRetries.delete(id);
+      this.emit('floorItems', [...this._floorItems.values()]);
+      if (this.state === STATE.LOOTING && this._lootPending.size === 0) {
+        this._pickNextFromQueue();
+      }
+    }
+  }
+
+  _onActionFailed() {
+    // Spoil ActionFailed: retry up to 4 times (covers movement race + brief cooldown overlap)
+    // before giving up and proceeding to attack without Spoil on this mob.
+    if (this.config.autoSpoil && this.config.spoilSkillId &&
+        this._castingSkillId === this.config.spoilSkillId && this._target && !this._castConfirmed) {
+      this._spoilFailCount++;
       this._castingSkillId = null;
-      this._castConfirmed  = true;
-      this._actionFailedCount = 0;
-      this._attackSkillIdx = (this._attackSkillIdx + 1) % this.config.attackSkills.length;
-      if ((this.config.attackSkillModes || {})[skillId] === 'once') this._onceSkillsUsed.add(skillId);
-      const nextIn = hitTime + Math.max(reuseDelay, 500) + 100;
-      this._dbg('skillCastStart skill=' + skillId + ' hitTime=' + hitTime + ' reuse=' + reuseDelay + ' → next in ' + nextIn + 'ms');
-      this._scheduleNextAttack(nextIn);
-    });
-
-    this.gc.on('skillCastCanceled', ({ casterObjectId }) => {
-      const player = this.gc.player;
-      if (!player || casterObjectId !== player.objectId) return;
-      if (!this._isAttacking() || this.config.attackSkills.length === 0) return;
-      if (this._castConfirmed) {
-        // Cast was interrupted mid-flight (stun, movement, etc.) after skillCastStart confirmed it.
-        this._dbg('skillCastCanceled (mid-cast) → retry in 500ms');
-        this._castConfirmed = false;
-        this._castingSkillId = null;
+      if (this._spoilFailCount >= 4) {
+        this._log('Spoil nach ' + this._spoilFailCount + ' Fehlern übersprungen für Mob #' + this._target.objectId);
+        this._spoiledNpcs.add(this._target.objectId);
+        this._spoilFailCount = 0;
         this._scheduleNextAttack(500);
-        return;
+      } else {
+        this._dbg('Spoil ActionFailed #' + this._spoilFailCount + ' → retry 800ms');
+        this._scheduleNextAttack(800);
       }
-      // Cast was rejected before it started — only react if it was one of our attack skills.
-      if (!this._castingSkillId) return;
-      this._dbg('skillCastCanceled skill=' + this._castingSkillId + ' → retry in 500ms');
+      return;
+    }
+    if (this.config.attackSkills.length > 0) {
+      if (this._isAttacking() && this._target) {
+        // Ignore queued ActionFailed that arrived after a cast was already confirmed by skillCastStart.
+        // These are stale responses from earlier useSkill spam that the server is draining.
+        if (this._castConfirmed) {
+          this._dbg('ActionFailed ignoriert (Cast bereits bestätigt)');
+          return;
+        }
+        this._actionFailedCount++;
+        this._dbg('ActionFailed (Skill) #' + this._actionFailedCount + ' → retry 1.5s');
+
+        // Too many consecutive failures → target is unreachable (dead, despawned, permanent desync).
+        if (this._actionFailedCount >= 15) {
+          this._log('Ziel ' + this._target.objectId + ' nach 15 Fehlern aufgegeben');
+          this._nearbyNpcs.delete(this._target.objectId);
+          this._target = null;
+          this._assistCurrentNpcId = null;
+          this._stopAttack();
+          this._cancelWaypoints();
+          if (this.state === STATE.COMBAT) {
+            this.state = STATE.FARMING;
+            this.emit('status', this._status());
+            this._pickTarget();
+          }
+          return;
+        }
+        // Every 3rd failure: position may be desynced — move closer even if stored dist looks OK.
+        if (this._actionFailedCount % 3 === 0) {
+          this._dbg('ActionFailed #' + this._actionFailedCount + ' → Positions-Desync? bewegen');
+          this.gc.selectTarget(this._target.objectId);
+          this._moveToTarget();
+        }
+        this._scheduleNextAttack(1500);
+      }
+      return;
+    }
+    // Auto-attack: ActionFailed usually means out of range.
+    if (this.state === STATE.COMBAT && this._target) {
+      const p = this.gc.player;
+      const dist = p ? Math.hypot(this._target.x - p.x, this._target.y - p.y) : Infinity;
+      this._dbg('ActionFailed (Auto-Attack) dist=' + Math.round(dist) + ' range=' + this.config.attackRange);
+      if (dist > this.config.attackRange) this._moveToTarget();
+    }
+  }
+
+  _onObjectMove(upd) {
+    const pl = this._nearbyPlayers.get(upd.objectId);
+    if (pl) {
+      // Use destination when available — gives follow a head-start towards where the char is going.
+      const tx = upd.toX !== undefined ? upd.toX : upd.x;
+      const ty = upd.toY !== undefined ? upd.toY : upd.y;
+      const tz = upd.toZ !== undefined ? upd.toZ : (upd.z !== undefined ? upd.z : pl.z);
+      pl.x = tx; pl.y = ty; pl.z = tz;
+      // React immediately when our follow target moves rather than waiting up to 1s for the tick.
+      if (upd.objectId === this.config.followTargetId) this._followTick();
+    }
+    const npc = this._nearbyNpcs.get(upd.objectId);
+    if (npc) {
+      npc.x = upd.toX !== undefined ? upd.toX : upd.x;
+      npc.y = upd.toY !== undefined ? upd.toY : upd.y;
+      npc.z = upd.toZ !== undefined ? upd.toZ : (upd.z !== undefined ? upd.z : npc.z);
+    }
+  }
+
+  _onCombatAttack({ attackerObjectId, targetObjectId }) {
+    const player = this.gc.player;
+
+    // Proactive FightBack: react on the attack packet, before the damage StatusUpdate arrives.
+    // This targets the specific attacker and fires one RTT earlier than the hpDrop fallback.
+    if (this.config.fightBack && this.config.autoFarm && this.config.mode === 'FARM' &&
+        player && targetObjectId === player.objectId && !this._target &&
+        (this.state === STATE.IDLE || this.state === STATE.LOOTING || this.state === STATE.FARMING)) {
+      const attacker = this._nearbyNpcs.get(attackerObjectId);
+      if (attacker && attacker.attackable) {
+        this._log('FightBack: Angriff von ' + (attacker.name || attackerObjectId));
+        if (this._lootFallback) { clearTimeout(this._lootFallback); this._lootFallback = null; }
+        this._lootQueue = [];
+        this._lootPending.clear();
+        this._target = attacker;
+        this.state = STATE.COMBAT;
+        this.emit('status', this._status());
+        this.gc.selectTarget(attacker.objectId);
+        const dist = Math.hypot(attacker.x - player.x, attacker.y - player.y);
+        if (dist > this.config.attackRange) this._moveToTarget();
+        this._startAttack();
+        return; // prevent assist check below from also firing
+      }
+      // Attacker not yet in NPC map — hpDrop-based fallback in playerStats will handle it
+    }
+
+    // Party-FightBack: if a party member is attacked, defend them.
+    if (this.config.fightBack && this.config.autoFarm && this.config.mode === 'FARM' &&
+        player && !this._target &&
+        (this.state === STATE.IDLE || this.state === STATE.FARMING || this.state === STATE.LOOTING)) {
+      const party = this.gc.party;
+      if (party && party.has(targetObjectId)) {
+        const attacker = this._nearbyNpcs.get(attackerObjectId);
+        if (attacker && attacker.attackable) {
+          const memberName = (party.get(targetObjectId) || {}).name || targetObjectId;
+          this._log('Party-FightBack: ' + (attacker.name || attackerObjectId) + ' greift ' + memberName + ' an');
+          if (this._lootFallback) { clearTimeout(this._lootFallback); this._lootFallback = null; }
+          this._lootQueue = [];
+          this._lootPending.clear();
+          this._target = attacker;
+          this.state = STATE.COMBAT;
+          this.emit('status', this._status());
+          this.gc.selectTarget(attacker.objectId);
+          const dist = Math.hypot(attacker.x - player.x, attacker.y - player.y);
+          if (dist > this.config.attackRange) this._moveToTarget();
+          this._startAttack();
+          return;
+        }
+      }
+    }
+
+    // Assist: track what the assist target is currently attacking.
+    // In FARM mode → enter combat immediately.
+    // In SUPPORT mode → stored in _assistCurrentNpcId; _supportTick() attacks as lowest priority.
+    if (!this.config.assistTargetId) return;
+    if (attackerObjectId !== this.config.assistTargetId) return;
+    const assistNpc = this._nearbyNpcs.get(targetObjectId);
+    if (!assistNpc || !assistNpc.attackable) return;
+    if (this.config.mode === 'SUPPORT') {
+      this._assistCurrentNpcId = targetObjectId;
+    } else if (this.state === STATE.IDLE || this.state === STATE.FARMING) {
+      this._target = assistNpc;
+      this.state = STATE.COMBAT;
+      this.gc.selectTarget(assistNpc.objectId);
+      this._startAttack();
+    }
+  }
+
+  // Assist pre-select: when the assist target selects an NPC, react immediately
+  // (fires ~1 RTT earlier than combatAttack).
+  _onTargetSelected({ objectId, targetObjId }) {
+    if (!this.config.assistTargetId || objectId !== this.config.assistTargetId) return;
+    if (!targetObjId) return;
+    const npc = this._nearbyNpcs.get(targetObjId);
+    if (!npc || !npc.attackable) return;
+    if (this.config.mode === 'SUPPORT') {
+      // Set the assist target and run the tick immediately (respects heal/buff priority).
+      if (this._assistCurrentNpcId !== targetObjId) {
+        this._assistCurrentNpcId = targetObjId;
+        this._supportTick();
+      }
+    } else if (this.state === STATE.IDLE || this.state === STATE.FARMING) {
+      if (this._target && this._target.objectId === targetObjId) return;
+      this._target = npc;
+      this.state = STATE.COMBAT;
+      this.gc.selectTarget(npc.objectId);
+      this._startAttack();
+    }
+  }
+
+  _onNearbyHpUpdate(upd) {
+    const npc = this._nearbyNpcs.get(upd.objectId);
+    if (npc) {
+      // Track damage dealt to current target.
+      if (this._target && upd.objectId === this._target.objectId && upd.hp !== undefined) {
+        let dmg = 0;
+        if (npc.hp !== undefined) {
+          // Normal case: we already have an HP baseline from a previous update.
+          dmg = Math.round(npc.hp - upd.hp);
+        } else if (upd.maxHp !== undefined) {
+          // First StatusUpdate for this NPC — maxHp arrived together with current HP.
+          // Use maxHp as the pre-combat baseline so the first hit is not lost.
+          dmg = Math.round(upd.maxHp - upd.hp);
+        }
+        if (dmg > 0) {
+          this._stats.dmgDealt += dmg;
+          this.emit('statEvent', { event: 'dmgDealt', value: dmg, target: npc.name || String(npc.npcTypeId - 1000000) });
+          this._lastCombatActivityAt = Date.now();
+        }
+      }
+      if (upd.hp !== undefined) npc.hp = upd.hp;
+      if (upd.maxHp !== undefined) npc.maxHp = upd.maxHp;
+      this.emit('npcHpUpdate', { objectId: upd.objectId, hp: npc.hp, maxHp: npc.maxHp });
+    }
+    const pl = this._nearbyPlayers.get(upd.objectId);
+    if (pl) {
+      if (upd.hp !== undefined) pl.hp = upd.hp;
+      if (upd.maxHp !== undefined) pl.maxHp = upd.maxHp;
+      this.emit('playerAppear', pl);
+    }
+  }
+
+  _onSkillCastStart({ casterObjectId, skillId, hitTime, reuseDelay }) {
+    const player = this.gc.player;
+    if (!player || casterObjectId !== player.objectId) return;
+
+    // Buff timing: server confirmed a buff cast — replace safety timeout with accurate hitTime
+    if (this._buffPending && this._buffPending.skillId === skillId) {
+      clearTimeout(this._buffPending.timer);
+      this._buffPending.timer = setTimeout(() => { this._buffPending = null; }, hitTime + 300);
+      return;
+    }
+
+    // Spoil confirmation: mark target as spoiled and proceed to attack rotation
+    if (this.config.autoSpoil && this.config.spoilSkillId && skillId === this.config.spoilSkillId) {
+      if (this._target) {
+        this._spoiledNpcs.add(this._target.objectId);
+        this._log('Spoil erfolgreich auf ' + (this._target.name || 'Mob #' + this._target.objectId) + ' – warte auf Angriff');
+      }
+      this._castingSkillId = null;
+      this._castConfirmed = true;
+      this._actionFailedCount = 0;
+      this._spoilFailCount = 0;
+      // No reuse wait needed — we won't cast Spoil again on this mob; attack right after cast ends
+      this._dbg('skillCastStart Spoil#' + skillId + ' bestätigt → Angriff in ' + (hitTime + 100) + 'ms');
+      this._scheduleNextAttack(hitTime + 100);
+      return;
+    }
+
+    if (!this._isAttacking() || this.config.attackSkills.length === 0) return;
+
+    // Ignore skills that are NOT in our attack rotation (buffs, racials, auto-casts, etc.).
+    // If we let those update attackRange or reschedule the combat timer, a racial ability with
+    // castRange=40 will overwrite our ranged spell's 600+ WU range and break approach logic.
+    if (!this.config.attackSkills.includes(skillId)) {
+      this._dbg('skillCastStart ignoriert (kein Attack-Skill): ' + skillId);
+      return;
+    }
+
+    const castRange = getSkillRange(skillId);
+    if (this.config.attackRange !== castRange) {
+      this.config.attackRange = castRange;
+      this._log('Skill #' + skillId + ' → castRange=' + castRange);
+    }
+    // Cast confirmed — advance rotation, mark active, reset failure counter.
+    this._castingSkillId = null;
+    this._castConfirmed  = true;
+    this._actionFailedCount = 0;
+    this._attackSkillIdx = (this._attackSkillIdx + 1) % this.config.attackSkills.length;
+    if ((this.config.attackSkillModes || {})[skillId] === 'once') this._onceSkillsUsed.add(skillId);
+    const nextIn = hitTime + Math.max(reuseDelay, 500) + 100;
+    this._dbg('skillCastStart skill=' + skillId + ' hitTime=' + hitTime + ' reuse=' + reuseDelay + ' → next in ' + nextIn + 'ms');
+    this._scheduleNextAttack(nextIn);
+  }
+
+  _onSkillCastCanceled({ casterObjectId }) {
+    const player = this.gc.player;
+    if (!player || casterObjectId !== player.objectId) return;
+    if (!this._isAttacking() || this.config.attackSkills.length === 0) return;
+    if (this._castConfirmed) {
+      // Cast was interrupted mid-flight (stun, movement, etc.) after skillCastStart confirmed it.
+      this._dbg('skillCastCanceled (mid-cast) → retry in 500ms');
+      this._castConfirmed = false;
       this._castingSkillId = null;
       this._scheduleNextAttack(500);
-    });
+      return;
+    }
+    // Cast was rejected before it started — only react if it was one of our attack skills.
+    if (!this._castingSkillId) return;
+    this._dbg('skillCastCanceled skill=' + this._castingSkillId + ' → retry in 500ms');
+    this._castingSkillId = null;
+    this._scheduleNextAttack(500);
+  }
 
-    this.gc.on('itemSpawn', item => {
-      this._floorItems.set(item.objectId, item);
-      this.emit('floorItems', [...this._floorItems.values()]);
+  _onItemSpawn(item) {
+    this._floorItems.set(item.objectId, item);
+    this.emit('floorItems', [...this._floorItems.values()]);
 
-      // Herbs of life (8600-8615): always pick up, regardless of autoPickup flag or state
-      const isHerb = item.itemId >= 8600 && item.itemId <= 8615;
-      if (isHerb) {
-        if (this.state === STATE.LOOTING) {
-          // Slot into queue: if nothing active, start immediately; otherwise enqueue
-          if (this._lootPending.size === 0 && this._lootQueue.length === 0) {
-            this._lootPending.add(item.objectId);
-            this._sendPickup(item);
-            this._resetLootFallback(5000);
-          } else {
-            this._lootQueue.push(item);
-          }
-        } else {
-          this._sendPickup(item);
-        }
-        return;
-      }
-
-      if (!this.config.autoPickup) return;
+    // Herbs of life (8600-8615): always pick up, regardless of autoPickup flag or state
+    const isHerb = item.itemId >= 8600 && item.itemId <= 8615;
+    if (isHerb) {
       if (this.state === STATE.LOOTING) {
         // Slot into queue: if nothing active, start immediately; otherwise enqueue
         if (this._lootPending.size === 0 && this._lootQueue.length === 0) {
@@ -696,137 +701,153 @@ class Bot extends EventEmitter {
         } else {
           this._lootQueue.push(item);
         }
-      } else if (this.state !== STATE.COMBAT && this.state !== STATE.HEALING) {
-        this._tryPickupItem(item);
+      } else {
+        this._sendPickup(item);
       }
-    });
+      return;
+    }
 
-    this.gc.on('die', (id, isSweepable) => {
-      if (this.gc.player && id === this.gc.player.objectId) {
-        this._log('Charakter gestorben – Bot gestoppt');
-        this.stop();
-        return;
+    if (!this.config.autoPickup) return;
+    if (this.state === STATE.LOOTING) {
+      // Slot into queue: if nothing active, start immediately; otherwise enqueue
+      if (this._lootPending.size === 0 && this._lootQueue.length === 0) {
+        this._lootPending.add(item.objectId);
+        this._sendPickup(item);
+        this._resetLootFallback(5000);
+      } else {
+        this._lootQueue.push(item);
       }
-      // Remove from NPC map immediately so _pickTarget() can't select the corpse.
-      // _deadNpcIds suppresses server re-broadcasts of the corpse's NpcInfo until DeleteObject.
-      // Auto-expire after 10s: covers missed DeleteObject packets and ObjectId reuse by the server.
-      // 10s > typical corpse decay (7-15s), so normal mobs despawn before the timer fires.
-      this._deadNpcIds.add(id);
-      const deadTimer = setTimeout(() => {
-        this._deadNpcIds.delete(id);
-        this._deadNpcTimers.delete(id);
-      }, 10000);
-      this._deadNpcTimers.set(id, deadTimer);
-      if (id === this._assistCurrentNpcId) {
-        if (this._assistAttacking) {
-          const killName = this._target ? (this._target.name || String(this._target.npcTypeId - 1000000)) : String(id);
-          const wasSpoiled = isSweepable || this._spoiledNpcs.has(id);
-          if (this.config.autoSpoil && this.config.sweeperSkillId && wasSpoiled) {
-            this._log('Sweep auf Mob #' + id + ' (SUPPORT – ' + (isSweepable ? 'Server' : 'eigenes Tracking') + ')');
-            const sweepId = id;
-            // Cancel the attack timer but keep _assistAttacking=true so _supportTick() doesn't
-            // start attacking a new mob before Sweep is cast (targetSelected may fire immediately).
-            if (this._attackInterval) { clearTimeout(this._attackInterval); this._attackInterval = null; }
-            if (this._sweeperTimer) clearTimeout(this._sweeperTimer);
-            this._sweeperTimer = setTimeout(() => {
-              this._sweeperTimer = null;
-              this.gc.selectTarget(sweepId);
-              this.gc.useSkill(this.config.sweeperSkillId);
-              // Now release the attack loop so the next assist target can be engaged
-              this._target = null;
-              this._stopAttack();
-              this._attackSkillIdx = 0;
-            }, 300);
-          } else {
-            this._target = null;
-            this._stopAttack();
-            this._attackSkillIdx = 0;
-          }
-          this._spoiledNpcs.delete(id);
-          this._stats.kills++;
-          this.emit('statEvent', { event: 'kill', target: killName });
-        }
-        this._assistCurrentNpcId = null;
-      }
-      if (this._nearbyNpcs.has(id)) {
-        this._nearbyNpcs.delete(id);
-        this._emitNpcs();
-      }
+    } else if (this.state !== STATE.COMBAT && this.state !== STATE.HEALING) {
+      this._tryPickupItem(item);
+    }
+  }
 
-      // Target mob died — enter LOOTING immediately (drops arrive in same TCP burst as Die)
-      if (this.state === STATE.COMBAT && this._target && this._target.objectId === id) {
-        this._stats.kills++;
-        this.emit('statEvent', { event: 'kill', target: this._target.name || String(this._target.npcTypeId - 1000000) });
-        // Auto-Spoil: sweep corpse if Spoil confirmed (isSweepable from packet OR own tracking).
-        // Some server builds don't set isSweepable in the Die packet for NPCs — use _spoiledNpcs as fallback.
+  _onDie(id, isSweepable) {
+    if (this.gc.player && id === this.gc.player.objectId) {
+      this._log('Charakter gestorben – Bot gestoppt');
+      this.stop();
+      return;
+    }
+    // Remove from NPC map immediately so _pickTarget() can't select the corpse.
+    // _deadNpcIds suppresses server re-broadcasts of the corpse's NpcInfo until DeleteObject.
+    // Auto-expire after 10s: covers missed DeleteObject packets and ObjectId reuse by the server.
+    // 10s > typical corpse decay (7-15s), so normal mobs despawn before the timer fires.
+    this._deadNpcIds.add(id);
+    const deadTimer = setTimeout(() => {
+      this._deadNpcIds.delete(id);
+      this._deadNpcTimers.delete(id);
+    }, 10000);
+    this._deadNpcTimers.set(id, deadTimer);
+    if (id === this._assistCurrentNpcId) {
+      if (this._assistAttacking) {
+        const killName = this._target ? (this._target.name || String(this._target.npcTypeId - 1000000)) : String(id);
         const wasSpoiled = isSweepable || this._spoiledNpcs.has(id);
-        const sweepScheduled = this.config.autoSpoil && this.config.sweeperSkillId && wasSpoiled;
-        if (sweepScheduled) {
-          this._log('Sweep auf Mob #' + id + (isSweepable ? ' (Server)' : ' (eigenes Tracking)'));
-          this._sweepPending = true;
+        if (this.config.autoSpoil && this.config.sweeperSkillId && wasSpoiled) {
+          this._log('Sweep auf Mob #' + id + ' (SUPPORT – ' + (isSweepable ? 'Server' : 'eigenes Tracking') + ')');
           const sweepId = id;
+          // Cancel the attack timer but keep _assistAttacking=true so _supportTick() doesn't
+          // start attacking a new mob before Sweep is cast (targetSelected may fire immediately).
+          if (this._attackTimeout) { clearTimeout(this._attackTimeout); this._attackTimeout = null; }
+          if (this._attackPollInterval) { clearInterval(this._attackPollInterval); this._attackPollInterval = null; }
           if (this._sweeperTimer) clearTimeout(this._sweeperTimer);
           this._sweeperTimer = setTimeout(() => {
             this._sweeperTimer = null;
+            this._log('Sweep gesendet → Mob #' + sweepId);
             this.gc.selectTarget(sweepId);
             this.gc.useSkill(this.config.sweeperSkillId);
-            // Fallback if sweepInfo never arrives (e.g. out of range, ActionFailed)
-            this._resetLootFallback(4000);
+            // Now release the attack loop so the next assist target can be engaged
+            this._target = null;
+            this._stopAttack();
+            this._attackSkillIdx = 0;
           }, 300);
+        } else {
+          this._target = null;
+          this._stopAttack();
+          this._attackSkillIdx = 0;
         }
         this._spoiledNpcs.delete(id);
-        this._target = null;
-        this.gc.deselectTarget();
-        this._stopAttack();
-        this._cancelWaypoints();
-        this.state = STATE.LOOTING;
-        this._lootPending.clear();
-        this.emit('status', this._status());
-        if (sweepScheduled) {
-          // Hold loot queue until sweepInfo arrives (or 4s fallback) — bot stays near corpse for Sweep
-        } else if (!this.config.autoPickup) {
-          this._resumeFromLoot();
+        this._stats.kills++;
+        this.emit('statEvent', { event: 'kill', target: killName });
+      }
+      this._assistCurrentNpcId = null;
+    }
+    if (this._nearbyNpcs.has(id)) {
+      this._nearbyNpcs.delete(id);
+      this._emitNpcs();
+    }
+
+    // Target mob died — enter LOOTING immediately (drops arrive in same TCP burst as Die)
+    if (this.state === STATE.COMBAT && this._target && this._target.objectId === id) {
+      this._stats.kills++;
+      this.emit('statEvent', { event: 'kill', target: this._target.name || String(this._target.npcTypeId - 1000000) });
+      // Auto-Spoil: sweep corpse if Spoil confirmed (isSweepable from packet OR own tracking).
+      // Some server builds don't set isSweepable in the Die packet for NPCs — use _spoiledNpcs as fallback.
+      const wasSpoiled = isSweepable || this._spoiledNpcs.has(id);
+      const sweepScheduled = this.config.autoSpoil && this.config.sweeperSkillId && wasSpoiled;
+      if (sweepScheduled) {
+        this._log('Sweep auf Mob #' + id + (isSweepable ? ' (Server)' : ' (eigenes Tracking)'));
+        this._sweepPending = true;
+        const sweepId = id;
+        if (this._sweeperTimer) clearTimeout(this._sweeperTimer);
+        this._sweeperTimer = setTimeout(() => {
+          this._sweeperTimer = null;
+          this._log('Sweep gesendet → Mob #' + sweepId);
+          this.gc.selectTarget(sweepId);
+          this.gc.useSkill(this.config.sweeperSkillId);
+          // Fallback if sweepInfo never arrives (e.g. out of range, ActionFailed)
+          this._resetLootFallback(4000);
+        }, 300);
+      }
+      this._spoiledNpcs.delete(id);
+      this._target = null;
+      this.gc.deselectTarget();
+      this._stopAttack();
+      this._cancelWaypoints();
+      this.state = STATE.LOOTING;
+      this._lootPending.clear();
+      this.emit('status', this._status());
+      if (sweepScheduled) {
+        // Hold loot queue until sweepInfo arrives (or 4s fallback) — bot stays near corpse for Sweep
+      } else if (!this.config.autoPickup) {
+        this._resumeFromLoot();
+      } else {
+        // Drops may arrive in the same burst (after Die) or in the next read
+        // itemSpawn handler takes over if _lootPending/queue is empty; 200ms fallback catches no-drops
+        this._lootQueue = [...this._floorItems.values()];
+        if (this._lootQueue.length === 0) {
+          this._resetLootFallback(200);
         } else {
-          // Drops may arrive in the same burst (after Die) or in the next read
-          // itemSpawn handler takes over if _lootPending/queue is empty; 200ms fallback catches no-drops
-          this._lootQueue = [...this._floorItems.values()];
-          if (this._lootQueue.length === 0) {
-            this._resetLootFallback(200);
-          } else {
-            this._pickNextFromQueue();
-          }
+          this._pickNextFromQueue();
         }
       }
-    });
-
-    this.gc.on('sweepInfo', ({ npcObjectId, items }) => {
-      this._sweepPending = false;
-      for (const it of items) {
-        this._stats.itemsLooted++;
-        this.emit('statEvent', { event: 'item', itemId: it.itemId, count: it.count || 1 });
-        this._log('Sweep: Item #' + it.itemId + (it.count > 1 ? ' ×' + it.count : '') + ' (Mob #' + npcObjectId + ')');
-      }
-      if (items.length === 0) this._log('Sweep: kein Rohstoff (Spoil fehlgeschlagen oder Mob nicht spoilbar)');
-      if (this.state === STATE.LOOTING) {
-        if (this.config.autoPickup) {
-          this._lootQueue = [...this._floorItems.values()];
-          if (this._lootQueue.length === 0) {
-            this._resumeFromLoot();
-          } else {
-            this._pickNextFromQueue();
-          }
-        } else {
-          this._resumeFromLoot();
-        }
-      }
-    });
-
-    this.gc.on('getItem', ({ itemId, count }) => {
-      this._stats.itemsLooted++;
-      this.emit('statEvent', { event: 'item', itemId, count: count || 1 });
-      this._log('Auto-Loot: Item #' + itemId + (count > 1 ? ' ×' + count : ''));
-    });
+    }
   }
+
+  _onSweepInfo({ npcObjectId, items }) {
+    this._sweepPending = false;
+    for (const it of items) {
+      this._stats.itemsLooted++;
+      this.emit('statEvent', { event: 'item', itemId: it.itemId, count: it.count || 1 });
+      this._log('Sweep: Item #' + it.itemId + (it.count > 1 ? ' ×' + it.count : '') + ' (Mob #' + npcObjectId + ')');
+    }
+    if (items.length === 0) this._log('Sweep: kein Rohstoff (Spoil fehlgeschlagen oder Mob nicht spoilbar)');
+    if (this.state === STATE.LOOTING) {
+      if (this.config.autoPickup) {
+        this._lootQueue = [...this._floorItems.values()];
+        if (this._lootQueue.length === 0) {
+          this._resumeFromLoot();
+        } else {
+          this._pickNextFromQueue();
+        }
+      } else {
+        this._resumeFromLoot();
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // STATE MACHINE
+  // ═══════════════════════════════════════════════════════════
 
   start() {
     if (this.state !== STATE.IDLE) return;
@@ -884,6 +905,10 @@ class Bot extends EventEmitter {
     this.emit('status', this._status());
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // HEALING
+  // ═══════════════════════════════════════════════════════════
+
   // Returns the appropriate heal skill ID for the given HP%, or 0 if no heal needed.
   // Uses tiered healRules when configured; falls back to single healSkillId/healHpPct.
   _selectHealSkill(hpPct) {
@@ -901,6 +926,58 @@ class Bot extends EventEmitter {
     const rules = this.config.healRules;
     if (rules && rules.length > 0) return Math.max(...rules.map(r => r.maxHpPct));
     return this.config.healHpPct;
+  }
+
+  _doHeal() {
+    const p = this.gc.player;
+    if (!p) return;
+    const hpPct = p.maxHp > 0 ? (p.hp / p.maxHp) * 100 : 100;
+    const skillId = this._selectHealSkill(hpPct);
+    if (!skillId) return;
+
+    this.state = STATE.HEALING;
+    this._stopAttack();
+    this._cancelWaypoints();
+    if (this._lootFallback) { clearTimeout(this._lootFallback); this._lootFallback = null; }
+    this._lootQueue   = [];
+    this._lootPending.clear();
+    this._log('Heile! HP: ' + Math.round(hpPct) + '% → Skill #' + skillId);
+
+    if (p.objectId) this.gc.selectTarget(p.objectId);
+    this.gc.useSkill(skillId);
+    if (this._healResumeTimer) clearTimeout(this._healResumeTimer);
+    this._healResumeTimer = setTimeout(() => {
+      this._healResumeTimer = null;
+      if (this.state === STATE.HEALING && this.config.autoFarm) {
+        this.state = STATE.FARMING;
+        this._pickTarget();
+      }
+    }, 3000);
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // TARGET SELECTION
+  // ═══════════════════════════════════════════════════════════
+
+  // Returns { npc, dist } for the nearest attackable NPC matching the given criteria, or null.
+  _findNearestAttackableNpc({ useZone = true, filterDead = true, maxRadius = null } = {}) {
+    const p = this.gc.player;
+    if (!p) return null;
+    const zone = useZone ? this.config.farmZone : null;
+    const r = maxRadius !== null ? maxRadius : this.config.farmRadius;
+    let nearest = null, nearestDist = Infinity;
+    for (const npc of this._nearbyNpcs.values()) {
+      if (!npc.attackable) continue;
+      if (filterDead && this._deadNpcIds.has(npc.objectId)) continue;
+      if (zone) {
+        if (npc.x < zone.x1 || npc.x > zone.x2 || npc.y < zone.y1 || npc.y > zone.y2) continue;
+      } else {
+        if (Math.hypot(npc.x - p.x, npc.y - p.y) > r) continue;
+      }
+      const d = Math.hypot(npc.x - p.x, npc.y - p.y);
+      if (d < nearestDist) { nearest = npc; nearestDist = d; }
+    }
+    return nearest ? { npc: nearest, dist: nearestDist } : null;
   }
 
   _pickTarget(ignoreZone = false) {
@@ -921,41 +998,31 @@ class Bot extends EventEmitter {
       return;
     }
 
-    let nearest = null;
-    let nearestDist = Infinity;
+    const maxRadius = ignoreZone ? this.config.farmRadius * 2 : this.config.farmRadius;
+    const found = this._findNearestAttackableNpc({ useZone: !ignoreZone, filterDead: true, maxRadius });
+    if (!found) return;
 
-    const zone = ignoreZone ? null : this.config.farmZone;
-    const radius = ignoreZone ? this.config.farmRadius * 2 : this.config.farmRadius;
-    for (const npc of this._nearbyNpcs.values()) {
-      if (!npc.attackable) continue;
-      if (this._deadNpcIds.has(npc.objectId)) continue;
-      if (zone) {
-        if (npc.x < zone.x1 || npc.x > zone.x2 || npc.y < zone.y1 || npc.y > zone.y2) continue;
-      } else {
-        if (Math.hypot(npc.x - p.x, npc.y - p.y) > radius) continue;
-      }
-      const d = Math.hypot(npc.x - p.x, npc.y - p.y);
-      if (d < nearestDist) { nearest = npc; nearestDist = d; }
-    }
-
-    if (nearest) {
-      // Cancel any pending loot activity before entering combat (no-op when not looting)
-      if (this._lootFallback) { clearTimeout(this._lootFallback); this._lootFallback = null; }
-      this._lootQueue = [];
-      this._lootPending.clear();
-      this._target = nearest;
-      this._actionFailedCount = 0;
-      this._spoilFailCount = 0;
-      this._onceSkillsUsed.clear();
-      this.state = STATE.COMBAT;
-      this._lastCombatActivityAt = Date.now();
-      this.emit('status', this._status());
-      this._log('Angreife: ' + (nearest.name || nearest.objectId) + ' dist=' + Math.round(nearestDist));
-      this.gc.selectTarget(nearest.objectId);
-      if (nearestDist > this.config.attackRange) this._moveToTarget(); // start walking immediately, don't wait for attack reply
-      this._startAttack();
-    }
+    const { npc: nearest, dist: nearestDist } = found;
+    // Cancel any pending loot activity before entering combat (no-op when not looting)
+    if (this._lootFallback) { clearTimeout(this._lootFallback); this._lootFallback = null; }
+    this._lootQueue = [];
+    this._lootPending.clear();
+    this._target = nearest;
+    this._actionFailedCount = 0;
+    this._spoilFailCount = 0;
+    this._onceSkillsUsed.clear();
+    this.state = STATE.COMBAT;
+    this._lastCombatActivityAt = Date.now();
+    this.emit('status', this._status());
+    this._log('Angreife: ' + (nearest.name || nearest.objectId) + ' dist=' + Math.round(nearestDist));
+    this.gc.selectTarget(nearest.objectId);
+    if (nearestDist > this.config.attackRange) this._moveToTarget(); // start walking immediately, don't wait for attack reply
+    this._startAttack();
   }
+
+  // ═══════════════════════════════════════════════════════════
+  // MOVEMENT
+  // ═══════════════════════════════════════════════════════════
 
   // Move toward current target using geodata BFS pathfinding with stuck detection
   _moveToTarget() {
@@ -1030,181 +1097,6 @@ class Bot extends EventEmitter {
     }, 2500);
   }
 
-  _startAttack() {
-    if (this._attackInterval) { this._dbg('_startAttack: bereits aktiv, skip'); return; }
-    this._dbg('_startAttack: skills=' + JSON.stringify(this.config.attackSkills));
-    this._doAttack();
-    if (this.config.attackSkills.length === 0 && !this._attackInterval) {
-      // Auto-attack: server maintains the attack loop; re-assert every 5s for edge cases.
-      // Guard avoids overwriting a Spoil timeout set inside _doAttack via _scheduleNextAttack.
-      this._attackInterval = setInterval(() => {
-        if (!this._target || !this._isAttacking()) { this._stopAttack(); return; }
-        this._doAttack();
-      }, 5000);
-    }
-    // Skills: next cast scheduled by skillCastStart (hitTime + reuseDelay).
-    // Safety timeout set inside _doAttack() in case the packet is missed.
-  }
-
-  _doAttack() {
-    if (!this._target) return;
-    const p = this.gc.player;
-    const dist = p ? Math.hypot(this._target.x - p.x, this._target.y - p.y) : 0;
-    const skills = this.config.attackSkills;
-    this._castConfirmed = false; // Reset for this new cast attempt
-
-    // Auto-Spoil: cast Spoil first if target not yet attempted, regardless of attack mode
-    if (this.config.autoSpoil && this.config.spoilSkillId &&
-        !this._spoiledNpcs.has(this._target.objectId)) {
-      if (dist > this.config.attackRange) {
-        this._dbg('_doAttack: Spoil – zu weit, bewegen');
-        this._moveToTarget();
-        this._scheduleNextAttack(1000);
-        return;
-      }
-      // Also wait if we just sent a moveTo — the MoveToLocation confirmation may not have arrived
-      // yet so isMoving is still false, but the server would reject useSkill(spoil) with ActionFailed.
-      const movedRecently = (Date.now() - this._lastMoveToAt) < 700;
-      if (this.gc.isMoving || movedRecently) {
-        this._dbg('_doAttack: Spoil – Bewegung' + (movedRecently ? ' (gerade gestartet)' : '') + ', warte 700ms');
-        this._scheduleNextAttack(700);
-        return;
-      }
-      this._castingSkillId = this.config.spoilSkillId;
-      this._dbg('_doAttack: Spoil#' + this.config.spoilSkillId + ' auf ' + this._target.objectId);
-      this.gc.selectTarget(this._target.objectId);
-      this.gc.useSkill(this.config.spoilSkillId);
-      this._scheduleNextAttack(12000);
-      return;
-    }
-
-    if (skills.length > 0) {
-      if (dist > this.config.attackRange) {
-        this._dbg('_doAttack: zu weit (' + Math.round(dist) + ' > ' + this.config.attackRange + ') → bewegen, retry 1s');
-        this._moveToTarget();
-        this._scheduleNextAttack(1000);
-        return;
-      }
-      // Don't cast while moving — L2 server rejects useSkill during movement.
-      // Wait for the character to stop rather than spamming the server with rejected requests.
-      if (this.gc.isMoving) {
-        this._dbg('_doAttack: Charakter in Bewegung → warte 400ms');
-        this._scheduleNextAttack(400);
-        return;
-      }
-      let skillId = skills[this._attackSkillIdx % skills.length];
-      // Skip 'once' skills already used on this target; stop if all are exhausted.
-      const onceModes = this.config.attackSkillModes || {};
-      let onceChecked = 0;
-      while (skillId !== 0 && onceModes[skillId] === 'once' && this._onceSkillsUsed.has(skillId)) {
-        this._attackSkillIdx = (this._attackSkillIdx + 1) % skills.length;
-        skillId = skills[this._attackSkillIdx % skills.length];
-        if (++onceChecked >= skills.length) { skillId = 0; break; } // all once-skills used → auto-attack
-      }
-      if (skillId === 0) {
-        // Normal-attack sentinel at end of list — hand off to server auto-attack, no further scheduling.
-        this._dbg('_doAttack: attack (sentinel) dist=' + Math.round(dist));
-        this.gc.attack(this._target.objectId);
-        this._castingSkillId = null;
-        return;
-      }
-      // Check global skill MP/HP thresholds — fall back to auto-attack if not met.
-      if (p) {
-        const mpPct = p.maxMp > 0 ? (p.mp / p.maxMp * 100) : 100;
-        const hpPct = p.maxHp > 0 ? (p.hp / p.maxHp * 100) : 100;
-        if ((this.config.skillMinMpPct > 0 && mpPct < this.config.skillMinMpPct) ||
-            (this.config.skillMinHpPct > 0 && hpPct < this.config.skillMinHpPct)) {
-          this._dbg('_doAttack: Skill #' + skillId + ' übersprungen (MP=' + Math.round(mpPct) + '% HP=' + Math.round(hpPct) + '%) → Auto-Angriff');
-          this.gc.attack(this._target.objectId);
-          this._castingSkillId = null;
-          this._scheduleNextAttack(2000); // retry skill after 2s
-          return;
-        }
-      }
-      this._castingSkillId = skillId;
-      this._dbg('_doAttack: useSkill(' + skillId + ') dist=' + Math.round(dist) + ' safety=12s');
-      // Re-select target before every skill cast: in SUPPORT mode, heals/buffs between ticks
-      // may have changed the server-side selection to a party member or self.
-      this.gc.selectTarget(this._target.objectId);
-      this.gc.useSkill(skillId);
-      // Do NOT advance _attackSkillIdx here — only advance in skillCastStart once the
-      // server confirms the cast actually started. Advancing prematurely causes retries
-      // to try the wrong (possibly also on-reuse) skill, leading to a stall.
-      this._scheduleNextAttack(12000);
-    } else {
-      if (dist > this.config.attackRange) {
-        this._moveToTarget();
-        return;
-      }
-      this._dbg('_doAttack: attack(' + this._target.objectId + ') dist=' + Math.round(dist));
-      this.gc.attack(this._target.objectId);
-      // When Spoil preceded the first auto-attack, the 5s heartbeat interval was not set up
-      // (to avoid overwriting the Spoil timeout). Set it up now on the first real attack.
-      if (!this._attackInterval) {
-        this._attackInterval = setInterval(() => {
-          if (!this._target || !this._isAttacking()) { this._stopAttack(); return; }
-          this._doAttack();
-        }, 5000);
-      }
-    }
-  }
-
-  // Replace any pending skill cast timeout with a new one-shot _doAttack call.
-  // Only called for skill-based combat (auto-attack uses setInterval, never calls this).
-  _scheduleNextAttack(ms) {
-    clearTimeout(this._attackInterval);
-    this._dbg('_scheduleNextAttack: ' + ms + 'ms');
-    this._attackInterval = setTimeout(() => {
-      this._attackInterval = null;
-      if (this._target && this._isAttacking()) this._doAttack();
-      else this._stopAttack();
-    }, ms);
-  }
-
-  // True whenever the attack loop is legitimately running (COMBAT or SUPPORT assist).
-  _isAttacking() {
-    return this.state === STATE.COMBAT ||
-           (this.state === STATE.SUPPORT && this._assistAttacking);
-  }
-
-  _stopAttack() {
-    if (this._attackInterval) {
-      clearTimeout(this._attackInterval);
-      this._attackInterval = null;
-    }
-    this._castingSkillId    = null;
-    this._castConfirmed     = false;
-    this._actionFailedCount = 0;
-    this._assistAttacking   = false;
-  }
-
-  _doHeal() {
-    const p = this.gc.player;
-    if (!p) return;
-    const hpPct = p.maxHp > 0 ? (p.hp / p.maxHp) * 100 : 100;
-    const skillId = this._selectHealSkill(hpPct);
-    if (!skillId) return;
-
-    this.state = STATE.HEALING;
-    this._stopAttack();
-    this._cancelWaypoints();
-    if (this._lootFallback) { clearTimeout(this._lootFallback); this._lootFallback = null; }
-    this._lootQueue   = [];
-    this._lootPending.clear();
-    this._log('Heile! HP: ' + Math.round(hpPct) + '% → Skill #' + skillId);
-
-    if (p.objectId) this.gc.selectTarget(p.objectId);
-    this.gc.useSkill(skillId);
-    if (this._healResumeTimer) clearTimeout(this._healResumeTimer);
-    this._healResumeTimer = setTimeout(() => {
-      this._healResumeTimer = null;
-      if (this.state === STATE.HEALING && this.config.autoFarm) {
-        this.state = STATE.FARMING;
-        this._pickTarget();
-      }
-    }, 3000);
-  }
-
   _checkCombatStall() {
     if (this.state !== STATE.COMBAT || !this.config.autoFarm) return;
     if (Date.now() - this._lastCombatActivityAt < 50000) return;
@@ -1244,6 +1136,174 @@ class Bot extends EventEmitter {
     }, travelMs);
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // COMBAT
+  // ═══════════════════════════════════════════════════════════
+
+  _startAttack() {
+    if (this._attackPollInterval || this._attackTimeout) { this._dbg('_startAttack: bereits aktiv, skip'); return; }
+    this._dbg('_startAttack: skills=' + JSON.stringify(this.config.attackSkills));
+    this._doAttack();
+    if (this.config.attackSkills.length === 0 && !this._attackPollInterval) {
+      // Auto-attack: server maintains the attack loop; re-assert every 5s for edge cases.
+      // Guard avoids overwriting a Spoil timeout set inside _doAttack via _scheduleNextAttack.
+      this._attackPollInterval = setInterval(() => {
+        if (!this._target || !this._isAttacking()) { this._stopAttack(); return; }
+        this._doAttack();
+      }, 5000);
+    }
+    // Skills: next cast scheduled by skillCastStart (hitTime + reuseDelay).
+    // Safety timeout set inside _doAttack() in case the packet is missed.
+  }
+
+  _doAttack() {
+    if (!this._target) return;
+    const p = this.gc.player;
+    const dist = p ? Math.hypot(this._target.x - p.x, this._target.y - p.y) : 0;
+    this._castConfirmed = false; // Reset for this new cast attempt
+
+    if (this._doAttackSpoil(dist)) return;
+    if (this.config.attackSkills.length > 0) {
+      this._doAttackSkill(p, dist);
+    } else {
+      this._doAttackAuto(dist);
+    }
+  }
+
+  // Handles the Spoil pre-attack branch. Returns true if Spoil is still pending (caller should return).
+  _doAttackSpoil(dist) {
+    if (!this.config.autoSpoil || !this.config.spoilSkillId) return false;
+    if (this._spoiledNpcs.has(this._target.objectId)) return false;
+
+    if (dist > this.config.attackRange) {
+      this._dbg('_doAttack: Spoil – zu weit, bewegen');
+      this._moveToTarget();
+      this._scheduleNextAttack(1000);
+      return true;
+    }
+    // Also wait if we just sent a moveTo — the MoveToLocation confirmation may not have arrived
+    // yet so isMoving is still false, but the server would reject useSkill(spoil) with ActionFailed.
+    const movedRecently = (Date.now() - this._lastMoveToAt) < 700;
+    if (this.gc.isMoving || movedRecently) {
+      this._dbg('_doAttack: Spoil – Bewegung' + (movedRecently ? ' (gerade gestartet)' : '') + ', warte 700ms');
+      this._scheduleNextAttack(700);
+      return true;
+    }
+    this._castingSkillId = this.config.spoilSkillId;
+    this._dbg('_doAttack: Spoil#' + this.config.spoilSkillId + ' auf ' + this._target.objectId);
+    this.gc.selectTarget(this._target.objectId);
+    this.gc.useSkill(this.config.spoilSkillId);
+    this._scheduleNextAttack(12000);
+    return true;
+  }
+
+  // Handles skill-based attack rotation.
+  _doAttackSkill(p, dist) {
+    const skills = this.config.attackSkills;
+    if (dist > this.config.attackRange) {
+      this._dbg('_doAttack: zu weit (' + Math.round(dist) + ' > ' + this.config.attackRange + ') → bewegen, retry 1s');
+      this._moveToTarget();
+      this._scheduleNextAttack(1000);
+      return;
+    }
+    // Don't cast while moving — L2 server rejects useSkill during movement.
+    // Wait for the character to stop rather than spamming the server with rejected requests.
+    if (this.gc.isMoving) {
+      this._dbg('_doAttack: Charakter in Bewegung → warte 400ms');
+      this._scheduleNextAttack(400);
+      return;
+    }
+    let skillId = skills[this._attackSkillIdx % skills.length];
+    // Skip 'once' skills already used on this target; stop if all are exhausted.
+    const onceModes = this.config.attackSkillModes || {};
+    let onceChecked = 0;
+    while (skillId !== 0 && onceModes[skillId] === 'once' && this._onceSkillsUsed.has(skillId)) {
+      this._attackSkillIdx = (this._attackSkillIdx + 1) % skills.length;
+      skillId = skills[this._attackSkillIdx % skills.length];
+      if (++onceChecked >= skills.length) { skillId = 0; break; } // all once-skills used → auto-attack
+    }
+    if (skillId === 0) {
+      // Normal-attack sentinel at end of list — hand off to server auto-attack, no further scheduling.
+      this._dbg('_doAttack: attack (sentinel) dist=' + Math.round(dist));
+      this.gc.attack(this._target.objectId);
+      this._castingSkillId = null;
+      return;
+    }
+    // Check global skill MP/HP thresholds — fall back to auto-attack if not met.
+    if (p) {
+      const mpPct = p.maxMp > 0 ? (p.mp / p.maxMp * 100) : 100;
+      const hpPct = p.maxHp > 0 ? (p.hp / p.maxHp * 100) : 100;
+      if ((this.config.skillMinMpPct > 0 && mpPct < this.config.skillMinMpPct) ||
+          (this.config.skillMinHpPct > 0 && hpPct < this.config.skillMinHpPct)) {
+        this._dbg('_doAttack: Skill #' + skillId + ' übersprungen (MP=' + Math.round(mpPct) + '% HP=' + Math.round(hpPct) + '%) → Auto-Angriff');
+        this.gc.attack(this._target.objectId);
+        this._castingSkillId = null;
+        this._scheduleNextAttack(2000); // retry skill after 2s
+        return;
+      }
+    }
+    this._castingSkillId = skillId;
+    this._dbg('_doAttack: useSkill(' + skillId + ') dist=' + Math.round(dist) + ' safety=12s');
+    // Re-select target before every skill cast: in SUPPORT mode, heals/buffs between ticks
+    // may have changed the server-side selection to a party member or self.
+    this.gc.selectTarget(this._target.objectId);
+    this.gc.useSkill(skillId);
+    // Do NOT advance _attackSkillIdx here — only advance in skillCastStart once the
+    // server confirms the cast actually started. Advancing prematurely causes retries
+    // to try the wrong (possibly also on-reuse) skill, leading to a stall.
+    this._scheduleNextAttack(12000);
+  }
+
+  // Handles auto-attack (no skills configured).
+  _doAttackAuto(dist) {
+    if (dist > this.config.attackRange) {
+      this._moveToTarget();
+      return;
+    }
+    this._dbg('_doAttack: attack(' + this._target.objectId + ') dist=' + Math.round(dist));
+    this.gc.attack(this._target.objectId);
+    // When Spoil preceded the first auto-attack, the 5s heartbeat interval was not set up
+    // (to avoid overwriting the Spoil timeout). Set it up now on the first real attack.
+    if (!this._attackPollInterval) {
+      this._attackPollInterval = setInterval(() => {
+        if (!this._target || !this._isAttacking()) { this._stopAttack(); return; }
+        this._doAttack();
+      }, 5000);
+    }
+  }
+
+  // Replace any pending skill cast timeout with a new one-shot _doAttack call.
+  // Only called for skill-based combat (auto-attack uses _attackPollInterval, never calls this).
+  _scheduleNextAttack(ms) {
+    if (this._attackPollInterval) { clearInterval(this._attackPollInterval); this._attackPollInterval = null; }
+    clearTimeout(this._attackTimeout);
+    this._dbg('_scheduleNextAttack: ' + ms + 'ms');
+    this._attackTimeout = setTimeout(() => {
+      this._attackTimeout = null;
+      if (this._target && this._isAttacking()) this._doAttack();
+      else this._stopAttack();
+    }, ms);
+  }
+
+  // True whenever the attack loop is legitimately running (COMBAT or SUPPORT assist).
+  _isAttacking() {
+    return this.state === STATE.COMBAT ||
+           (this.state === STATE.SUPPORT && this._assistAttacking);
+  }
+
+  _stopAttack() {
+    if (this._attackPollInterval) { clearInterval(this._attackPollInterval); this._attackPollInterval = null; }
+    if (this._attackTimeout)      { clearTimeout(this._attackTimeout);       this._attackTimeout      = null; }
+    this._castingSkillId    = null;
+    this._castConfirmed     = false;
+    this._actionFailedCount = 0;
+    this._assistAttacking   = false;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // BUFFS
+  // ═══════════════════════════════════════════════════════════
+
   _startBuffTimer() {
     this._doSelfBuffs(); // immediate cast on mode start; recurring timer is always-on
   }
@@ -1274,6 +1334,10 @@ class Bot extends EventEmitter {
     };
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // SUPPORT MODE
+  // ═══════════════════════════════════════════════════════════
+
   _startSupportTimer() {
     this._supportTimer = setInterval(() => this._supportTick(), 1000);
   }
@@ -1302,165 +1366,187 @@ class Bot extends EventEmitter {
     if (this.state === STATE.COMBAT) return;
     const p = this.gc.player;
     if (!p) return;
+    const party = this.gc.party;
     const now = Date.now();
-    const party = this.gc.party; // Map<objectId, {objectId,name,hp,maxHp,...}>
 
-    // 1. Heal self (highest priority, tiered rules or single skill)
+    if (this._supportHealSelf(p))               return;
+    if (this._supportResurrect(p, party, now))  return;
+    if (this._supportGroupBattleHeal(p, party)) return;
+    if (this._supportGroupHeal(p, party))       return;
+    if (this._supportHealParty(party))          return;
+    if (this._buffPending)                      return;
+    for (const buff of this.config.selfBuffs) {
+      if (now - (this._selfBuffLastCast[buff.skillId] || 0) >= buff.intervalMs) return;
+    }
+    if (this._supportPartyBuff(p, party, now))  return;
+    this._supportAssistAttack();
+  }
+
+  // Priority 1: heal self when below healSelfHpPct.
+  _supportHealSelf(p) {
     const selfHpPct = p.maxHp > 0 ? (p.hp / p.maxHp) * 100 : 100;
     const selfHealId = this._selectHealSkill(selfHpPct);
     if (selfHealId && selfHpPct < this.config.healSelfHpPct) {
       if (p.objectId) this.gc.selectTarget(p.objectId);
       this.gc.useSkill(selfHealId);
       this._log('Heile selbst: ' + Math.round(selfHpPct) + '% → #' + selfHealId);
-      return;
+      return true;
     }
+    return false;
+  }
 
-    // 1b. Resurrect dead party member (skill first, scroll as fallback)
-    if ((this.config.resSkillId || this.config.resItemId) && party && party.size > 0) {
-      const mpPct = p.maxMp > 0 ? (p.mp / p.maxMp) * 100 : 100;
-      if (mpPct >= (this.config.farmMinMpPct || 0)) {
-        for (const member of party.values()) {
-          if (member.maxHp > 0 && member.hp === 0) {
-            const now = Date.now();
-            if (now - (this._lastResurrect[member.objectId] || 0) > 12000) {
-              this._lastResurrect[member.objectId] = now;
-              this.gc.selectTarget(member.objectId);
-              if (this.config.resSkillId) {
-                this.gc.useSkill(this.config.resSkillId);
-                this._log('Resurrect (Skill ' + this.config.resSkillId + ') → ' + member.name);
-              } else {
-                const scroll = this.gc.inventory.find(it => it.itemId === this.config.resItemId);
-                if (scroll) {
-                  this.gc.useItem(scroll.objectId);
-                  this._log('Resurrect (Scroll ' + this.config.resItemId + ') → ' + member.name);
-                } else {
-                  this._log('Resurrect: kein Scroll ' + this.config.resItemId + ' im Inventar');
-                }
-              }
-              return;
+  // Priority 1b: resurrect dead party members (skill first, scroll as fallback).
+  _supportResurrect(p, party, now) {
+    if (!(this.config.resSkillId || this.config.resItemId)) return false;
+    if (!party || party.size === 0) return false;
+    const mpPct = p.maxMp > 0 ? (p.mp / p.maxMp) * 100 : 100;
+    if (mpPct < (this.config.farmMinMpPct || 0)) return false;
+    for (const member of party.values()) {
+      if (member.maxHp > 0 && member.hp === 0) {
+        if (now - (this._lastResurrect[member.objectId] || 0) > 12000) {
+          this._lastResurrect[member.objectId] = now;
+          this.gc.selectTarget(member.objectId);
+          if (this.config.resSkillId) {
+            this.gc.useSkill(this.config.resSkillId);
+            this._log('Resurrect (Skill ' + this.config.resSkillId + ') → ' + member.name);
+          } else {
+            const scroll = this.gc.inventory.find(it => it.itemId === this.config.resItemId);
+            if (scroll) {
+              this.gc.useItem(scroll.objectId);
+              this._log('Resurrect (Scroll ' + this.config.resItemId + ') → ' + member.name);
+            } else {
+              this._log('Resurrect: kein Scroll ' + this.config.resItemId + ' im Inventar');
             }
           }
+          return true;
         }
       }
     }
+    return false;
+  }
 
-    // 2. Group battle heal — cast on self (AoE) when ≥2 members below threshold
-    if (this.config.groupBattleHealSkillId && party && party.size >= 1) {
-      const allMembers = [{ objectId: p.objectId, hp: p.hp, maxHp: p.maxHp }, ...party.values()];
-      const cnt = allMembers.filter(m => m.maxHp > 0 && (m.hp / m.maxHp * 100) < this.config.groupBattleHealHpPct).length;
-      if (cnt >= 2) {
-        this.gc.useSkill(this.config.groupBattleHealSkillId);
-        this._log('Gruppen-Kampfheilung: ' + cnt + ' Mitglieder < ' + this.config.groupBattleHealHpPct + '%');
-        return;
-      }
+  // Priority 2: AoE group heal (battle) when ≥2 members below threshold.
+  _supportGroupBattleHeal(p, party) {
+    if (!this.config.groupBattleHealSkillId) return false;
+    if (!party || party.size < 1) return false;
+    const allMembers = [{ objectId: p.objectId, hp: p.hp, maxHp: p.maxHp }, ...party.values()];
+    const cnt = allMembers.filter(m => m.maxHp > 0 && (m.hp / m.maxHp * 100) < this.config.groupBattleHealHpPct).length;
+    if (cnt >= 2) {
+      this.gc.useSkill(this.config.groupBattleHealSkillId);
+      this._log('Gruppen-Kampfheilung: ' + cnt + ' Mitglieder < ' + this.config.groupBattleHealHpPct + '%');
+      return true;
     }
+    return false;
+  }
 
-    // 3. Group heal — cast on self (AoE) when ≥2 members below threshold
-    if (this.config.groupHealSkillId && party && party.size >= 1) {
-      const allMembers = [{ objectId: p.objectId, hp: p.hp, maxHp: p.maxHp }, ...party.values()];
-      const cnt = allMembers.filter(m => m.maxHp > 0 && (m.hp / m.maxHp * 100) < this.config.groupHealHpPct).length;
-      if (cnt >= 2) {
-        this.gc.useSkill(this.config.groupHealSkillId);
-        this._log('Gruppen-Heilung: ' + cnt + ' Mitglieder < ' + this.config.groupHealHpPct + '%');
-        return;
-      }
+  // Priority 3: AoE group heal when ≥2 members below threshold.
+  _supportGroupHeal(p, party) {
+    if (!this.config.groupHealSkillId) return false;
+    if (!party || party.size < 1) return false;
+    const allMembers = [{ objectId: p.objectId, hp: p.hp, maxHp: p.maxHp }, ...party.values()];
+    const cnt = allMembers.filter(m => m.maxHp > 0 && (m.hp / m.maxHp * 100) < this.config.groupHealHpPct).length;
+    if (cnt >= 2) {
+      this.gc.useSkill(this.config.groupHealSkillId);
+      this._log('Gruppen-Heilung: ' + cnt + ' Mitglieder < ' + this.config.groupHealHpPct + '%');
+      return true;
     }
+    return false;
+  }
 
-    // 4. Heal most critically low party member (tiered rules)
-    if (party && party.size > 0) {
-      let worstMember = null; let worstHealId = 0; let worstPct = Infinity;
-      for (const member of party.values()) {
-        if (member.maxHp > 0) {
-          const pct = (member.hp / member.maxHp) * 100;
-          const hid = this._selectHealSkill(pct);
-          if (hid && pct < this.config.healTargetHpPct && pct < worstPct) {
-            worstPct = pct; worstMember = member; worstHealId = hid;
-          }
+  // Priority 4: heal the most critically low party member.
+  _supportHealParty(party) {
+    if (!party || party.size === 0) return false;
+    let worstMember = null, worstHealId = 0, worstPct = Infinity;
+    for (const member of party.values()) {
+      if (member.maxHp > 0) {
+        const pct = (member.hp / member.maxHp) * 100;
+        const hid = this._selectHealSkill(pct);
+        if (hid && pct < this.config.healTargetHpPct && pct < worstPct) {
+          worstPct = pct; worstMember = member; worstHealId = hid;
         }
       }
-      if (worstMember) {
-        this.gc.selectTarget(worstMember.objectId);
-        this.gc.useSkill(worstHealId);
-        this._log('Heile ' + worstMember.name + ': ' + Math.round(worstPct) + '% → #' + worstHealId);
-        return;
-      }
     }
-
-    // 5. Self-buff priority gate — block party buffs while a cast is in progress or a self-buff is due
-    if (this._buffPending) return;
-    for (const buff of this.config.selfBuffs) {
-      if (now - (this._selfBuffLastCast[buff.skillId] || 0) >= buff.intervalMs) return;
+    if (worstMember) {
+      this.gc.selectTarget(worstMember.objectId);
+      this.gc.useSkill(worstHealId);
+      this._log('Heile ' + worstMember.name + ': ' + Math.round(worstPct) + '% → #' + worstHealId);
+      return true;
     }
+    return false;
+  }
 
-    // 6. Party-buff — round-robin across all targets including self (__self__).
-    // Per-member override: partyMemberBuffs[name] || partyBuffs (fallback when empty).
-    // Urgency uses real PartySpelled data when available, falls back to cast-timestamp otherwise.
+  // Priority 6: apply party buffs round-robin, using PartySpelled data when available.
+  _supportPartyBuff(p, party, now) {
     const memberBuffsCfg = this.config.partyMemberBuffs || {};
     const selfTarget = p ? { objectId: p.objectId, name: '__self__', displayName: p.name || 'Selbst' } : null;
     const allTargets = [...(selfTarget ? [selfTarget] : []), ...(party ? [...party.values()] : [])];
-    if (allTargets.length > 0) {
-      for (let i = 0; i < allTargets.length; i++) {
-        const member = allTargets[(this._partyBuffMemberCursor + i) % allTargets.length];
-        const key = member.name === '__self__' ? '__self__' : member.name;
-        const buffs = (memberBuffsCfg[key] && memberBuffsCfg[key].length > 0)
-          ? memberBuffsCfg[key] : this.config.partyBuffs;
-        if (!buffs.length) continue;
-        const effects = this._partyMemberEffects.get(member.objectId);
-        let bestBuff = null; let bestUrgency = -Infinity;
-        for (const buff of buffs) {
-          if (!this._partyBuffLastCast[buff.skillId]) this._partyBuffLastCast[buff.skillId] = {};
-          let urgency;
-          if (effects) {
-            const active = effects.find(e => e.skillId === buff.skillId);
-            if (active && (active.duration === -1 || active.duration > 30)) continue;
-            if (!active) {
-              // Buff missing despite PartySpelled data — higher-level buff may occupy the slot.
-              // Apply 30s retry cooldown to avoid MP drain.
-              const last = this._partyBuffLastCast[buff.skillId][member.objectId] || 0;
-              if (now - last < 30000) continue;
-            }
-            urgency = active ? (30 - active.duration) : 1000;
-          } else {
+    if (allTargets.length === 0) return false;
+    for (let i = 0; i < allTargets.length; i++) {
+      const member = allTargets[(this._partyBuffMemberCursor + i) % allTargets.length];
+      const key = member.name === '__self__' ? '__self__' : member.name;
+      const buffs = (memberBuffsCfg[key] && memberBuffsCfg[key].length > 0)
+        ? memberBuffsCfg[key] : this.config.partyBuffs;
+      if (!buffs.length) continue;
+      const effects = this._partyMemberEffects.get(member.objectId);
+      let bestBuff = null, bestUrgency = -Infinity;
+      for (const buff of buffs) {
+        if (!this._partyBuffLastCast[buff.skillId]) this._partyBuffLastCast[buff.skillId] = {};
+        let urgency;
+        if (effects) {
+          const active = effects.find(e => e.skillId === buff.skillId);
+          if (active && (active.duration === -1 || active.duration > 30)) continue;
+          if (!active) {
+            // Buff missing despite PartySpelled data — higher-level buff may occupy the slot.
+            // Apply 30s retry cooldown to avoid MP drain.
             const last = this._partyBuffLastCast[buff.skillId][member.objectId] || 0;
-            urgency = (now - last) - buff.intervalMs;
-            if (urgency <= 0) continue;
+            if (now - last < 30000) continue;
           }
-          if (urgency > bestUrgency) { bestUrgency = urgency; bestBuff = buff; }
+          urgency = active ? (30 - active.duration) : 1000;
+        } else {
+          const last = this._partyBuffLastCast[buff.skillId][member.objectId] || 0;
+          urgency = (now - last) - buff.intervalMs;
+          if (urgency <= 0) continue;
         }
-        if (bestBuff) {
-          this._partyBuffMemberCursor = (this._partyBuffMemberCursor + i + 1) % allTargets.length;
-          this.gc.selectTarget(member.objectId);
-          this.gc.useSkill(bestBuff.skillId);
-          this._partyBuffLastCast[bestBuff.skillId][member.objectId] = now;
-          const displayName = member.displayName || member.name;
-          this._log('Buff ' + (bestBuff.label || bestBuff.skillId) + ' → ' + displayName);
-          this._setBuffPending(bestBuff.skillId);
-          return;
-        }
+        if (urgency > bestUrgency) { bestUrgency = urgency; bestBuff = buff; }
       }
-      this._partyBuffMemberCursor = 0;
+      if (bestBuff) {
+        this._partyBuffMemberCursor = (this._partyBuffMemberCursor + i + 1) % allTargets.length;
+        this.gc.selectTarget(member.objectId);
+        this.gc.useSkill(bestBuff.skillId);
+        this._partyBuffLastCast[bestBuff.skillId][member.objectId] = now;
+        const displayName = member.displayName || member.name;
+        this._log('Buff ' + (bestBuff.label || bestBuff.skillId) + ' → ' + displayName);
+        this._setBuffPending(bestBuff.skillId);
+        return true;
+      }
     }
+    this._partyBuffMemberCursor = 0;
+    return false;
+  }
 
-    // 7. Assist-attack: lowest priority — only when nothing needs healing/buffing.
-    // Uses the same server-feedback loop as FARM mode (_startAttack / skillCastStart).
-    if (this.config.assistTargetId && this._assistCurrentNpcId) {
-      const target = this._nearbyNpcs.get(this._assistCurrentNpcId);
-      if (!target || !target.attackable) {
-        this._assistCurrentNpcId = null;
-        if (this._assistAttacking) { this._target = null; this._stopAttack(); this._attackSkillIdx = 0; }
-        return;
-      }
-      if (!this._assistAttacking) {
-        // New target — start the skill loop from the beginning.
-        this._target = target;
-        this._assistAttacking = true;
-        this._attackSkillIdx = 0;
-        this.gc.selectTarget(target.objectId);
-        this._dbg('Assist-Attack start → ' + (target.name || target.objectId));
-        this._startAttack();
-      }
+  // Priority 7: assist-attack — lowest priority, only when nothing else needs doing.
+  _supportAssistAttack() {
+    if (!this.config.assistTargetId || !this._assistCurrentNpcId) return;
+    const target = this._nearbyNpcs.get(this._assistCurrentNpcId);
+    if (!target || !target.attackable) {
+      this._assistCurrentNpcId = null;
+      if (this._assistAttacking) { this._target = null; this._stopAttack(); this._attackSkillIdx = 0; }
+      return;
+    }
+    if (!this._assistAttacking) {
+      // New target — start the skill loop from the beginning.
+      this._target = target;
+      this._assistAttacking = true;
+      this._attackSkillIdx = 0;
+      this.gc.selectTarget(target.objectId);
+      this._dbg('Assist-Attack start → ' + (target.name || target.objectId));
+      this._startAttack();
     }
   }
+
+  // ═══════════════════════════════════════════════════════════
+  // LOOTING
+  // ═══════════════════════════════════════════════════════════
 
   _pickNextFromQueue() {
     if (this._lootQueue.length === 0) {
@@ -1549,6 +1635,10 @@ class Bot extends EventEmitter {
     this._pickTarget();
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // UTILITIES
+  // ═══════════════════════════════════════════════════════════
+
   _emitNpcs() {
     const npcs = [...this._nearbyNpcs.values()];
     this.emit('npcs', npcs);
@@ -1594,6 +1684,10 @@ class Bot extends EventEmitter {
   _log(msg) { this.emit('log', '[Bot] ' + msg); }
   _dbg(msg) { if (this.config.debug) console.log('[Bot:DBG] ' + msg); }
 
+  // ═══════════════════════════════════════════════════════════
+  // PUBLIC API
+  // ═══════════════════════════════════════════════════════════
+
   setConfig(cfg) {
     Object.assign(this.config, cfg);
     if (cfg.debug !== undefined && this.gc) this.gc.debugMode = !!cfg.debug;
@@ -1617,15 +1711,9 @@ class Bot extends EventEmitter {
   }
 
   pickTarget() {
-    const p = this.gc.player;
-    if (!p) return;
-    let nearest = null, nearestDist = Infinity;
-    for (const npc of this._nearbyNpcs.values()) {
-      if (!npc.attackable) continue;
-      const d = Math.hypot(npc.x - p.x, npc.y - p.y);
-      if (d < this.config.farmRadius && d < nearestDist) { nearest = npc; nearestDist = d; }
-    }
-    if (nearest) {
+    const found = this._findNearestAttackableNpc({ useZone: false, filterDead: false, maxRadius: this.config.farmRadius });
+    if (found) {
+      const { npc: nearest } = found;
       this._target = nearest;
       this.gc.selectTarget(nearest.objectId);
       this._moveToTarget();
