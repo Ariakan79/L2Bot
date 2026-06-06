@@ -1153,6 +1153,11 @@ class GameClient extends EventEmitter {
       off += 10;
     }
     this.emit('partyMemberEffects', { objectId, effects });
+    // PartySpelled is also sent to the affected player themselves — update own display
+    if (this.player && objectId === this.player.objectId) {
+      this.activeEffects = effects;
+      this.emit('activeEffects', effects);
+    }
   }
 
   _handleAbnormalStatusUpdate(data) {
@@ -1172,6 +1177,7 @@ class GameClient extends EventEmitter {
     }
     this.activeEffects = effects;
     this.emit('activeEffects', effects);
+    this._log('AbnormalStatus: ' + count + ' Effekt(e) [' + effects.slice(0, 5).map(e => e.skillId).join(',') + (count > 5 ? ',...' : '') + ']');
   }
 
   _sendAppearing() {

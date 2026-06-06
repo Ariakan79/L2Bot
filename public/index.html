@@ -2150,7 +2150,7 @@ function renderEffects(effects) {
         const el = document.getElementById('ep_' + e.skillId);
         if (el) { el.textContent = fmtDur(rem); if (rem > 0) allGone = false; }
       });
-      if (allGone) { clearInterval(iv); renderEffects([]); }
+      if (allGone) { clearInterval(iv); } // Server sends updated AbnormalStatusUpdate on buff expiry
     }, 1000);
     effects.forEach(e => { if (e.duration >= 0 && _effectTimers[e.skillId]) _effectTimers[e.skillId].iv = iv; });
   }
