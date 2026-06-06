@@ -108,6 +108,7 @@ class Bot extends EventEmitter {
     this._lastResurrect = {};              // objectId → timestamp of last resurrection attempt
     this._respawnTimer = null;
     this._sweeperTimer = null;
+    this._sweepPending = false;
     this._jitterTimer  = null;
     this._healResumeTimer = null;
     this._zoneCenterTimer = null;
@@ -717,8 +718,35 @@ class Bot extends EventEmitter {
       }, 10000);
       this._deadNpcTimers.set(id, deadTimer);
       if (id === this._assistCurrentNpcId) {
+        if (this._assistAttacking) {
+          const killName = this._target ? (this._target.name || String(this._target.npcTypeId - 1000000)) : String(id);
+          const wasSpoiled = isSweepable || this._spoiledNpcs.has(id);
+          if (this.config.autoSpoil && this.config.sweeperSkillId && wasSpoiled) {
+            this._log('Sweep auf Mob #' + id + ' (SUPPORT – ' + (isSweepable ? 'Server' : 'eigenes Tracking') + ')');
+            const sweepId = id;
+            // Cancel the attack timer but keep _assistAttacking=true so _supportTick() doesn't
+            // start attacking a new mob before Sweep is cast (targetSelected may fire immediately).
+            if (this._attackInterval) { clearTimeout(this._attackInterval); this._attackInterval = null; }
+            if (this._sweeperTimer) clearTimeout(this._sweeperTimer);
+            this._sweeperTimer = setTimeout(() => {
+              this._sweeperTimer = null;
+              this.gc.selectTarget(sweepId);
+              this.gc.useSkill(this.config.sweeperSkillId);
+              // Now release the attack loop so the next assist target can be engaged
+              this._target = null;
+              this._stopAttack();
+              this._attackSkillIdx = 0;
+            }, 300);
+          } else {
+            this._target = null;
+            this._stopAttack();
+            this._attackSkillIdx = 0;
+          }
+          this._spoiledNpcs.delete(id);
+          this._stats.kills++;
+          this.emit('statEvent', { event: 'kill', target: killName });
+        }
         this._assistCurrentNpcId = null;
-        if (this._assistAttacking) { this._target = null; this._stopAttack(); this._attackSkillIdx = 0; }
       }
       if (this._nearbyNpcs.has(id)) {
         this._nearbyNpcs.delete(id);
@@ -732,14 +760,18 @@ class Bot extends EventEmitter {
         // Auto-Spoil: sweep corpse if Spoil confirmed (isSweepable from packet OR own tracking).
         // Some server builds don't set isSweepable in the Die packet for NPCs — use _spoiledNpcs as fallback.
         const wasSpoiled = isSweepable || this._spoiledNpcs.has(id);
-        if (this.config.autoSpoil && this.config.sweeperSkillId && wasSpoiled) {
+        const sweepScheduled = this.config.autoSpoil && this.config.sweeperSkillId && wasSpoiled;
+        if (sweepScheduled) {
           this._log('Sweep auf Mob #' + id + (isSweepable ? ' (Server)' : ' (eigenes Tracking)'));
+          this._sweepPending = true;
           const sweepId = id;
           if (this._sweeperTimer) clearTimeout(this._sweeperTimer);
           this._sweeperTimer = setTimeout(() => {
             this._sweeperTimer = null;
             this.gc.selectTarget(sweepId);
             this.gc.useSkill(this.config.sweeperSkillId);
+            // Fallback if sweepInfo never arrives (e.g. out of range, ActionFailed)
+            this._resetLootFallback(4000);
           }, 300);
         }
         this._spoiledNpcs.delete(id);
@@ -750,7 +782,9 @@ class Bot extends EventEmitter {
         this.state = STATE.LOOTING;
         this._lootPending.clear();
         this.emit('status', this._status());
-        if (!this.config.autoPickup) {
+        if (sweepScheduled) {
+          // Hold loot queue until sweepInfo arrives (or 4s fallback) — bot stays near corpse for Sweep
+        } else if (!this.config.autoPickup) {
           this._resumeFromLoot();
         } else {
           // Drops may arrive in the same burst (after Die) or in the next read
@@ -766,12 +800,25 @@ class Bot extends EventEmitter {
     });
 
     this.gc.on('sweepInfo', ({ npcObjectId, items }) => {
+      this._sweepPending = false;
       for (const it of items) {
         this._stats.itemsLooted++;
         this.emit('statEvent', { event: 'item', itemId: it.itemId, count: it.count || 1 });
         this._log('Sweep: Item #' + it.itemId + (it.count > 1 ? ' ×' + it.count : '') + ' (Mob #' + npcObjectId + ')');
       }
       if (items.length === 0) this._log('Sweep: kein Rohstoff (Spoil fehlgeschlagen oder Mob nicht spoilbar)');
+      if (this.state === STATE.LOOTING) {
+        if (this.config.autoPickup) {
+          this._lootQueue = [...this._floorItems.values()];
+          if (this._lootQueue.length === 0) {
+            this._resumeFromLoot();
+          } else {
+            this._pickNextFromQueue();
+          }
+        } else {
+          this._resumeFromLoot();
+        }
+      }
     });
 
     this.gc.on('getItem', ({ itemId, count }) => {
@@ -830,6 +877,7 @@ class Bot extends EventEmitter {
     this._lootRetries.clear();
     this._deadNpcIds.clear();
     this._spoiledNpcs.clear();
+    this._sweepPending = false;
     this._lastMoveToAt = 0;
     this._spoilFailCount = 0;
     this._log('Bot gestoppt');
@@ -1457,12 +1505,14 @@ class Bot extends EventEmitter {
       this._lootFallback = null;
       if (this.state === STATE.LOOTING) {
         if (ms > 1000) this._log('Loot-Timeout – weiter');
+        this._sweepPending = false;
         this._resumeFromLoot();
       }
     }, ms);
   }
 
   _resumeFromLoot() {
+    if (this._sweepPending) return;
     if (this._lootFallback) { clearTimeout(this._lootFallback); this._lootFallback = null; }
     this._lootQueue   = [];
     this._lootPending.clear();
