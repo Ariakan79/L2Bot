@@ -1,14 +1,18 @@
 # L2Bot
 
-Out-of-game (OOG) Bot für **Lineage 2 High Five (CT2.6)**. Implementiert das L2-Netzwerkprotokoll in Node.js und stellt eine browserbasierte Steueroberfläche bereit. Bis zu 16 Accounts können gleichzeitig betrieben werden.
+[🇩🇪 Deutsch](README.de.md) | 🇬🇧 English
 
 ---
 
-## Voraussetzungen
+Out-of-game (OOG) bot for **Lineage 2 High Five (CT2.6)**. Implements the L2 network protocol from scratch in Node.js and provides a browser-based control panel. Up to 16 accounts can be operated simultaneously.
 
-- **Node.js 18 oder neuer** — [nodejs.org](https://nodejs.org)
-- **Linux oder Windows** (auf macOS nicht getestet)
-- Zugang zum L2-Spielserver (Login- und Game-Server-Adresse)
+---
+
+## Requirements
+
+- **Node.js 18 or newer** — [nodejs.org](https://nodejs.org)
+- **Linux or Windows** (untested on macOS)
+- Access to an L2 game server (login and game server address)
 
 ---
 
@@ -19,133 +23,133 @@ git clone https://github.com/Ariakan79/L2Bot.git
 cd L2Bot
 ```
 
-Das war es. Abhängigkeiten werden beim ersten Start automatisch installiert.
+That's it. Dependencies are installed automatically on first start.
 
 ---
 
-## Start
+## Starting the Bot
 
 ```bash
 ./start.sh
 ```
 
-Das Skript:
-1. Installiert npm-Pakete falls noch nicht vorhanden
-2. Prüft ob Daten-Tabellen (NPC/Skill/Item-Namen) vorhanden sind — falls nicht, werden sie aus den Server-Quelldaten gebaut (nur notwendig wenn `public/data/` fehlt, was beim Klonen nicht der Fall ist)
-3. Startet den Bot-Server auf `http://localhost:3001`
+The script:
+1. Installs npm packages if not already present
+2. Checks whether data tables (NPC/skill/item names) exist — if not, builds them from server source data (only needed if `public/data/` is missing, which is not the case after cloning)
+3. Starts the bot server at `http://localhost:3001`
 
-Danach einfach den Browser öffnen und `http://localhost:3001` aufrufen.
+Then open your browser and go to `http://localhost:3001`.
 
 ---
 
-## Bedienung
+## Usage
 
 ### Login
 
-Im Browser auf **„+"** klicken, um eine neue Session zu erstellen:
+Click **"+"** in the browser to create a new session:
 
-| Feld | Beschreibung |
+| Field | Description |
 |---|---|
-| Server-Host | Adresse des Login-Servers (Standard: vorkonfiguriert) |
-| Login-Port | Standard: 2106 |
-| Benutzername | L2-Account-Name |
-| Passwort | L2-Account-Passwort |
+| Server Host | Login server address (default: pre-configured) |
+| Login Port | Default: 2106 |
+| Username | L2 account name |
+| Password | L2 account password |
 
-Nach dem Login auf **Charakter auswählen** klicken.
+After logging in, click **Select Character**.
 
-### Bot-Tabs
+### Bot Tabs
 
-Jede eingeloggte Session hat eigene Tabs:
+Each logged-in session has its own tabs:
 
-- **Bot** — Farming- und Support-Konfiguration, Start/Stop
-- **Party** — Party-Einladungen, Auto-Accept, Auto-Res
-- **Inventar** — Itemliste der aktuellen Session
+- **Bot** — Farming and support configuration, start/stop
+- **Party** — Party invitations, auto-accept, auto-res
+- **Inventory** — Item list of the current session
 
 ---
 
-## Konfiguration
+## Configuration
 
-Alle Einstellungen werden pro Charakter gespeichert und beim nächsten Login automatisch wiederhergestellt.
+All settings are saved per character and automatically restored on the next login.
 
-### Modus
+### Mode
 
-| Modus | Beschreibung |
+| Mode | Description |
 |---|---|
-| **Farm** | Bot sucht selbstständig Mobs im konfigurierten Radius und greift an |
-| **Support** | Bot heilt/bufft Party-Mitglieder; greift optional das Ziel des Assist-Targets an |
+| **Farm** | Bot autonomously searches for mobs within the configured radius and attacks |
+| **Support** | Bot heals/buffs party members; optionally assists the assist target in combat |
 
-### Farm-Einstellungen (Tab „Bot")
+### Farm Settings (Bot tab)
 
-- **Farm-Radius** — Umkreis in World Units, in dem Mobs gesucht werden
-- **Farm-Zone** — Alternativ: feste Rechteck-Zone (X1/Y1/X2/Y2)
-- **Attack-Skills** — Skill-Rotation für den Angriff; Slot mit `0` = Auto-Angriff
-- **Auto-Pickup** — Automatisch Items aufheben
-- **FightBack** — Reagiert auf eingehenden Schaden auch im Idle-Zustand
-- **Shots (Soul/Spirit)** — Automatische Soulshot/Spiritshot-Nutzung
+- **Farm Radius** — Search radius in World Units
+- **Farm Zone** — Alternative: fixed rectangular zone (X1/Y1/X2/Y2)
+- **Attack Skills** — Skill rotation for combat; a slot set to `0` triggers auto-attack
+- **Auto-Pickup** — Automatically pick up items
+- **FightBack** — Reacts to incoming damage even while idle
+- **Shots (Soul/Spirit)** — Automatic Soulshot/Spiritshot usage
 
-### Support-Einstellungen
+### Support Settings
 
-- **Assist-Target** — Party-Mitglied, dessen Ziel der Bot ebenfalls angreift
-- **Heal-Skill** — Skill zum Heilen von sich selbst und Party
-- **Heal-Schwellwert** — Ab welchem HP% geheilt wird
-- **Self-Buffs / Party-Buffs** — Skill-ID + Intervall in Sekunden
-- **Auto-Res** — Eingehende Res-Angebote automatisch annehmen; optional eigenen Res-Skill/Scroll konfigurieren
+- **Assist Target** — Party member whose target the bot also attacks
+- **Heal Skill** — Skill used to heal self and party
+- **Heal Threshold** — HP% below which healing is triggered
+- **Self-Buffs / Party-Buffs** — Skill ID + interval in seconds
+- **Auto-Res** — Automatically accept incoming resurrection offers; optionally configure own res skill/scroll
 
-### Zwerg: Spoil & Sweep
+### Dwarf: Spoil & Sweep
 
-- **Auto-Spoil (Zwerg)** aktivieren
-- **Spoil-Skill** und **Sweeper-Skill** aus den Dropdowns wählen
+- Enable **Auto-Spoil (Dwarf)**
+- Select **Spoil Skill** and **Sweeper Skill** from the dropdowns
 
-Der Bot castet Spoil automatisch vor dem ersten Angriff auf jeden Mob und führt Sweep nach dem Tod aus — sowohl im Farm- als auch im Support-Modus.
+The bot automatically casts Spoil before the first attack on each mob and performs Sweep after the mob dies — in both Farm and Support mode.
 
-### Ressourcen-Schwellen
+### Resource Thresholds
 
-Der Bot pausiert automatisch wenn:
-- MP unter **Farm Stop MP%** fällt
-- HP unter **Farm Stop HP%** fällt
+The bot pauses automatically when:
+- MP drops below **Farm Stop MP%**
+- HP drops below **Farm Stop HP%**
 
 ---
 
-## Geodaten (optional)
+## Geodata (optional)
 
-Der Bot verwendet L2J-Geodaten (`.l2j`-Dateien) für Pathfinding — also um Wände und Hindernisse zu umgehen. **Ohne Geodaten läuft der Bot normal**, bewegt sich aber immer direkt auf Ziele zu (ohne Wandvermeidung).
+The bot uses L2J geodata (`.l2j` files) for pathfinding — to navigate around walls and obstacles. **Without geodata the bot works normally**, but always moves in a straight line toward targets (no wall avoidance).
 
-### Geodaten einrichten
+### Setting up Geodata
 
-1. `.l2j`-Regiondateien in ein lokales Verzeichnis legen, z.B. `/home/user/geodata/`
-2. Bot mit der Umgebungsvariable `L2_GEO_DIR` starten:
+1. Place the `.l2j` region files in a local directory, e.g. `/home/user/geodata/`
+2. Start the bot with the `L2_GEO_DIR` environment variable:
 
 ```bash
 L2_GEO_DIR=/home/user/geodata ./start.sh
 ```
 
-Geodaten für High Five CT2.6 können aus einer L2J-Server-Installation übernommen werden (Ordner `geodata/` im Server-Verzeichnis).
+Geodata for High Five CT2.6 can be taken from an L2J server installation (the `geodata/` folder in the server directory).
 
 ---
 
-## Charakter-Profile
+## Character Profiles
 
-Charakter-Konfigurationen werden lokal in `profiles/characters.json` gespeichert. Diese Datei ist nicht im Repository enthalten (`.gitignore`) und enthält keine Zugangsdaten — nur Bot-Einstellungen wie Skills, Radius und Modus.
+Character configurations are stored locally in `profiles/characters.json`. This file is not included in the repository (`.gitignore`) and contains no credentials — only bot settings such as skills, radius and mode.
 
 ---
 
-## Lizenz & Disclaimer
+## License & Disclaimer
 
-Dieser Code wird als **freie Software ohne Gewinnerzielungsabsicht** bereitgestellt.
+This code is provided as **free software with no intention of commercial use**.
 
-Die Nutzung steht jedem offen. Eine kommerzielle Nutzung ist nicht beabsichtigt und wird nicht unterstützt.
+Anyone is free to use it. Commercial use is not intended and not supported.
 
-**Abhängigkeiten und deren Lizenzen:**
+**Dependencies and their licenses:**
 
-| Paket | Lizenz |
+| Package | License |
 |---|---|
 | [express](https://github.com/expressjs/express) | MIT |
 | [ws](https://github.com/websockets/ws) | MIT |
 | [node-forge](https://github.com/digitalbazaar/forge) | BSD-3-Clause / MIT |
 | [blowfish](https://www.npmjs.com/package/blowfish) | MIT |
 
-**Rechtlicher Hinweis:**
+**Legal Notice:**
 
-Das Betreiben von Bots kann gegen die Nutzungsbedingungen (Terms of Service) des jeweiligen Spielservers verstoßen. Die Nutzung dieses Projekts geschieht auf eigene Verantwortung. Die Autoren übernehmen keine Haftung für Konsequenzen, die sich aus der Verwendung ergeben — einschließlich Account-Sperren oder sonstiger Maßnahmen seitens des Server-Betreibers.
+Operating bots may violate the Terms of Service of the respective game server. Use of this project is at your own risk. The authors accept no liability for any consequences arising from its use — including account bans or other actions taken by the server operator.
 
-Lineage 2 ist ein eingetragenes Warenzeichen von NCSoft Corporation. Dieses Projekt steht in keiner Verbindung zu NCSoft.
+Lineage 2 is a registered trademark of NCSoft Corporation. This project is not affiliated with NCSoft in any way.
