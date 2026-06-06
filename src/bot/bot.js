@@ -453,8 +453,15 @@ class Bot extends EventEmitter {
           }
           return;
         }
-        // Every 3rd failure: position may be desynced — move closer even if stored dist looks OK.
-        if (this._actionFailedCount % 3 === 0) {
+        // If mob moved out of attack range, move immediately on every failure.
+        // Otherwise (in-range failure = desync), nudge every 3rd failure.
+        const fp = this.gc.player;
+        const failDist = fp && this._target ? Math.hypot(this._target.x - fp.x, this._target.y - fp.y) : 0;
+        if (failDist > this.config.attackRange) {
+          this._dbg('ActionFailed: außer Reichweite (' + Math.round(failDist) + ') → bewegen');
+          this.gc.selectTarget(this._target.objectId);
+          this._moveToTarget();
+        } else if (this._actionFailedCount % 3 === 0) {
           this._dbg('ActionFailed #' + this._actionFailedCount + ' → Positions-Desync? bewegen');
           this.gc.selectTarget(this._target.objectId);
           this._moveToTarget();
@@ -1030,7 +1037,7 @@ class Bot extends EventEmitter {
     if (!p || !this._target) return;
     const t = this._target;
     const dist = Math.hypot(t.x - p.x, t.y - p.y);
-    if (dist < 100) return; // already close enough
+    if (dist < 30) return; // avoid jitter when literally on top of target
 
     // Debounce: if _pickTarget() already sent a moveTo and actionFailed fires within
     // 500ms, suppress the redundant second moveTo that causes a visible movement jerk.
