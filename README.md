@@ -110,6 +110,45 @@ The bot pauses automatically when:
 
 ---
 
+## Server Compatibility
+
+### Supported
+
+This version is developed and tested against **Lineage 2 High Five (CT2.6)** running on **L2J Mobius CT 2.6**. The default login server address is `server.ariakan.eu`.
+
+The following protocol details are hardcoded to this chronicle:
+
+| Component | Detail |
+|---|---|
+| Login port | 2106 |
+| Game port | 7777 |
+| Encryption | Login: Blowfish (static init key + per-session key); Game: XOR sliding cipher |
+| String encoding | UTF-16LE, 2-byte null terminator |
+| Packet opcodes | CT2.6 High Five layout |
+| Extended packets | `0xFE` prefix with `uint16LE` sub-opcode |
+
+### Using a Different Server Address
+
+The login server address can be changed directly in the browser UI when creating a session — no code change needed. The default can also be updated in `server.js`:
+
+```js
+// server.js, line 43
+const DEFAULT_HOST = 'your.server.address';
+```
+
+### Supporting Other Chronicles
+
+The bot **will not work out of the box** with other Lineage 2 chronicles (e.g. Interlude CT1, Gracia, Goddess of Destruction). Packet structures, opcodes, and field layouts differ between chronicles. Porting requires:
+
+1. **`src/proto/gameClient.js`** — update packet handlers for changed opcodes and field offsets (e.g. `UserInfo`, `NpcInfo`, `Die`, `StatusUpdate`)
+2. **`src/proto/loginClient.js`** — adjust if the login handshake differs (key exchange, credential packet format)
+3. **`public/data/`** — rebuild name/range tables from the target server's XML data using `build-data.js`, updating the hardcoded source paths at the top of that file
+4. **`src/geo/geodata.js`** — geodata format is L2J-specific; L2OFF servers use a different binary format
+
+Other CT2.6 servers running L2J Mobius should be largely compatible with only the server address needing to change.
+
+---
+
 ## Geodata (optional)
 
 The bot uses L2J geodata (`.l2j` files) for pathfinding — to navigate around walls and obstacles. **Without geodata the bot works normally**, but always moves in a straight line toward targets (no wall avoidance).

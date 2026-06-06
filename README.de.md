@@ -110,6 +110,45 @@ Der Bot pausiert automatisch wenn:
 
 ---
 
+## Server-Kompatibilität
+
+### Unterstützt
+
+Diese Version wurde entwickelt und getestet für **Lineage 2 High Five (CT2.6)** auf Basis von **L2J Mobius CT 2.6**. Die voreingestellte Login-Server-Adresse ist `server.ariakan.eu`.
+
+Folgende Protokoll-Details sind auf diese Chronicle fest einprogrammiert:
+
+| Komponente | Detail |
+|---|---|
+| Login-Port | 2106 |
+| Game-Port | 7777 |
+| Verschlüsselung | Login: Blowfish (statischer Init-Key + Session-Key); Game: XOR Sliding Cipher |
+| String-Kodierung | UTF-16LE, 2-Byte Null-Terminator |
+| Paket-Opcodes | CT2.6 High Five Layout |
+| Extended Packets | `0xFE`-Prefix mit `uint16LE` Sub-Opcode |
+
+### Andere Server-Adresse verwenden
+
+Die Login-Server-Adresse kann direkt im Browser-UI beim Erstellen einer Session geändert werden — ohne Code-Anpassung. Der Standard-Wert lässt sich in `server.js` ändern:
+
+```js
+// server.js, Zeile 43
+const DEFAULT_HOST = 'dein.server.adresse';
+```
+
+### Andere Chronicles unterstützen
+
+Der Bot funktioniert **nicht ohne Weiteres** mit anderen Lineage-2-Chronicles (z.B. Interlude CT1, Gracia, Goddess of Destruction). Paketstrukturen, Opcodes und Feldlayouts unterscheiden sich zwischen Chronicles. Eine Portierung erfordert:
+
+1. **`src/proto/gameClient.js`** — Paket-Handler für geänderte Opcodes und Feld-Offsets anpassen (z.B. `UserInfo`, `NpcInfo`, `Die`, `StatusUpdate`)
+2. **`src/proto/loginClient.js`** — Anpassen falls der Login-Handshake abweicht (Key-Exchange, Credential-Paketformat)
+3. **`public/data/`** — Namen- und Reichweiten-Tabellen aus den XML-Daten des Zielservers neu bauen via `build-data.js` (hardcodierte Quellpfade am Anfang der Datei anpassen)
+4. **`src/geo/geodata.js`** — Das Geodata-Format ist L2J-spezifisch; L2OFF-Server verwenden ein anderes Binärformat
+
+Andere CT2.6-Server auf Basis von L2J Mobius sollten weitgehend kompatibel sein — in der Regel reicht eine Änderung der Server-Adresse.
+
+---
+
 ## Geodaten (optional)
 
 Der Bot verwendet L2J-Geodaten (`.l2j`-Dateien) für Pathfinding — also um Wände und Hindernisse zu umgehen. **Ohne Geodaten läuft der Bot normal**, bewegt sich aber immer direkt auf Ziele zu (ohne Wandvermeidung).
