@@ -216,6 +216,7 @@ class GameClient extends EventEmitter {
       case 0x17: this._handleGetItem(data); break;  // GET_ITEM (auto-loot / pickup)
       case 0x4D: break;  // compact entity info — silence
       case 0x79: break;  // formerly wrong ValidateLocation opcode — silence
+      case 0xF3: this._handleConfirmDlg(data); break;  // CONFIRM_DLG
       default:
         if (this.debugMode) this._log('Unhandled packet 0x' + opcode.toString(16).padStart(2,'0') + ' len=' + data.length);
         break;
@@ -1435,6 +1436,35 @@ class GameClient extends EventEmitter {
     buf.writeInt32LE(shotType, 7);
     this._send(buf);
     this._log('AutoSoulShot itemId=' + itemId + ' type=' + shotType + ' ' + (enable ? 'EIN' : 'AUS'));
+  }
+
+  _handleConfirmDlg(data) {
+    let off = 1;
+    if (off + 8 > data.length) return;
+    const messageId  = data.readInt32LE(off); off += 4;
+    const paramCount = data.readInt32LE(off); off += 4;
+    for (let i = 0; i < paramCount && off + 4 <= data.length; i++) {
+      const type = data.readInt32LE(off); off += 4;
+      if (type === 0 || type === 12) {       // TYPE_TEXT / TYPE_PLAYER_NAME → UTF-16LE string
+        const r = readString(data, off); off = r.nextOff;
+      } else if (type === 6) { off += 8; }   // TYPE_LONG_NUMBER → int64
+      else if (type === 4) { off += 8; }     // TYPE_SKILL_NAME → skillId(4) + level(4)
+      else { off += 4; }                     // int32 types (TYPE_INT_NUMBER, item/npc names, …)
+    }
+    if (off + 8 > data.length) return;
+    const time        = data.readInt32LE(off); off += 4;
+    const requesterId = data.readInt32LE(off);
+    this.emit('confirmDlg', { messageId, requesterId, time });
+  }
+
+  sendDlgAnswer(messageId, answer, requesterId) {
+    // DlgAnswer (0xC6): messageId(4) answer(4) requesterId(4)
+    const buf = Buffer.alloc(13);
+    buf[0] = 0xC6;
+    buf.writeInt32LE(messageId, 1);
+    buf.writeInt32LE(answer, 5);
+    buf.writeInt32LE(requesterId, 9);
+    this._send(buf);
   }
 
   multiSellChoose(listId, entryId, amount) {

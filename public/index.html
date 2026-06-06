@@ -832,6 +832,9 @@ input[type=number] { -moz-appearance: textfield; }
               <label class="toggle-label" style="flex:1">
                 <input type="checkbox" id="autoAcceptParty" onchange="applyConfig()"> Auto-Accept
               </label>
+              <label class="toggle-label" style="flex:1">
+                <input type="checkbox" id="autoAcceptRes" onchange="applyConfig()"> Auto-Res
+              </label>
             </div>
             <label class="toggle-label" style="margin-bottom:5px">
               <input type="checkbox" id="autoRespawn" checked onchange="applyConfig()"> Auto-Resp.
@@ -1019,6 +1022,20 @@ input[type=number] { -moz-appearance: textfield; }
             <input id="groupBattleHealHpPct" type="number" value="40" min="1" max="99" style="width:42px" onclick="event.stopPropagation()" onchange="applyConfig()">
             <span style="font-size:10px;color:#888">%</span>
           </div>
+        </div>
+      </div>
+
+      <!-- Resurrection -->
+      <div class="card" style="margin-bottom:8px">
+        <h3>Resurrection</h3>
+        <div style="font-size:10px;color:#888;margin-bottom:4px">Tote Party-Mitglieder wiederbeleben:</div>
+        <div style="display:flex;gap:4px;align-items:center;margin-bottom:4px">
+          <div class="label" style="white-space:nowrap" title="Skill-ID für Resurrection (z.B. 1016)">Skill ID</div>
+          <input id="resSkillId" type="number" value="0" min="0" style="flex:1" onchange="applyConfig()">
+        </div>
+        <div style="display:flex;gap:4px;align-items:center">
+          <div class="label" style="white-space:nowrap" title="Item-Template-ID eines Resurrection-Scrolls (Fallback wenn kein Skill, z.B. 3936)">Scroll ID</div>
+          <input id="resItemId" type="number" value="0" min="0" style="flex:1" onchange="applyConfig()">
         </div>
       </div>
 
@@ -2891,6 +2908,9 @@ function applyConfig() {
     groupBattleHealHpPct:   parseInt(document.getElementById('groupBattleHealHpPct').value) || 40,
     autoRespawn:            document.getElementById('autoRespawn').checked,
     autoAcceptParty:  document.getElementById('autoAcceptParty').checked,
+    autoAcceptRes:    document.getElementById('autoAcceptRes').checked,
+    resSkillId:       parseInt(document.getElementById('resSkillId').value) || 0,
+    resItemId:        parseInt(document.getElementById('resItemId').value) || 0,
     healTargetHpPct:  parseInt(document.getElementById('healTargetHpPct').value)||60,
     healSelfHpPct:    parseInt(document.getElementById('healSelfHpPct').value)||30,
     followDist:       parseInt(document.getElementById('followDist').value)||150,
@@ -2935,6 +2955,9 @@ function reloadBotConfigUI(sess) {
   document.getElementById('spoilSkillRow').style.display = cfg.autoSpoil ? '' : 'none';
   document.getElementById('autoRespawn').checked     = cfg.autoRespawn     ?? true;
   document.getElementById('autoAcceptParty').checked = cfg.autoAcceptParty ?? false;
+  document.getElementById('autoAcceptRes').checked   = cfg.autoAcceptRes   ?? true;
+  document.getElementById('resSkillId').value        = cfg.resSkillId      ?? 0;
+  document.getElementById('resItemId').value         = cfg.resItemId       ?? 0;
   document.getElementById('followDist').value        = cfg.followDist      ?? 150;
   document.getElementById('farmMinMpPct').value      = cfg.farmMinMpPct    ?? 0;
   document.getElementById('farmMinHpPct').value      = cfg.farmMinHpPct    ?? 0;

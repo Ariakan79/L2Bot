@@ -59,6 +59,9 @@ class Bot extends EventEmitter {
       groupHealHpPct: 80,
       groupBattleHealSkillId: 0,// cast on self when ≥2 party members below groupBattleHealHpPct
       groupBattleHealHpPct: 40,
+      autoAcceptRes: true,      // auto-accept incoming resurrection dialog
+      resSkillId: 0,            // skill ID used to resurrect dead party members (e.g. 1016)
+      resItemId: 0,             // item template ID of resurrection scroll (fallback when no skill)
       debug: false,             // print verbose combat timing to console
     };
 
@@ -102,6 +105,7 @@ class Bot extends EventEmitter {
     this._partyBuffMemberCursor = 0;       // round-robin index into party.values()
     this._lastCombatActivityAt = 0;        // last time dmg was dealt or received in COMBAT
     this._deadNpcTimers = new Map();       // objectId → timerId for _deadNpcIds auto-expire
+    this._lastResurrect = {};              // objectId → timestamp of last resurrection attempt
     this._respawnTimer = null;
     this._sweeperTimer = null;
     this._jitterTimer  = null;
@@ -269,6 +273,13 @@ class Bot extends EventEmitter {
         this.gc.answerJoinParty(true);
       } else {
         this._log('Party-Einladung von ' + info.requesterName + ' (autoAccept aus)');
+      }
+    });
+
+    this.gc.on('confirmDlg', ({ messageId, requesterId }) => {
+      if (this.config.autoAcceptRes && messageId === 1510) {
+        this.gc.sendDlgAnswer(messageId, 1, requesterId);
+        this._log('Resurrection angenommen');
       }
     });
 
@@ -1254,6 +1265,35 @@ class Bot extends EventEmitter {
       this.gc.useSkill(selfHealId);
       this._log('Heile selbst: ' + Math.round(selfHpPct) + '% → #' + selfHealId);
       return;
+    }
+
+    // 1b. Resurrect dead party member (skill first, scroll as fallback)
+    if ((this.config.resSkillId || this.config.resItemId) && party && party.size > 0) {
+      const mpPct = p.maxMp > 0 ? (p.mp / p.maxMp) * 100 : 100;
+      if (mpPct >= (this.config.farmMinMpPct || 0)) {
+        for (const member of party.values()) {
+          if (member.maxHp > 0 && member.hp === 0) {
+            const now = Date.now();
+            if (now - (this._lastResurrect[member.objectId] || 0) > 12000) {
+              this._lastResurrect[member.objectId] = now;
+              this.gc.selectTarget(member.objectId);
+              if (this.config.resSkillId) {
+                this.gc.useSkill(this.config.resSkillId);
+                this._log('Resurrect (Skill ' + this.config.resSkillId + ') → ' + member.name);
+              } else {
+                const scroll = this.gc.inventory.find(it => it.itemId === this.config.resItemId);
+                if (scroll) {
+                  this.gc.useItem(scroll.objectId);
+                  this._log('Resurrect (Scroll ' + this.config.resItemId + ') → ' + member.name);
+                } else {
+                  this._log('Resurrect: kein Scroll ' + this.config.resItemId + ' im Inventar');
+                }
+              }
+              return;
+            }
+          }
+        }
+      }
     }
 
     // 2. Group battle heal — cast on self (AoE) when ≥2 members below threshold
