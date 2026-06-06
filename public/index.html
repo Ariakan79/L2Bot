@@ -2017,7 +2017,8 @@ function updatePlayerDisplay(p) {
   setBar('barHp','lblHp',p.hp,p.maxHp);
   setBar('barMp','lblMp',p.mp,p.maxMp);
   setBar('barCp','lblCp',p.cp,p.maxCp);
-  const expPct = calcExpPct(p.exp, p.level);
+  // Prefer server-computed expPct (from UserInfo); fall back to local EXP_TABLE calculation
+  const expPct = (p.expPct != null) ? p.expPct : calcExpPct(p.exp, p.level);
   if (expPct !== null) {
     document.getElementById('barExp').style.width = expPct.toFixed(2) + '%';
     document.getElementById('lblExp').textContent = expPct.toFixed(2) + '%';

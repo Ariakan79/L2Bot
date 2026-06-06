@@ -371,7 +371,9 @@ class GameClient extends EventEmitter {
       const expLo = data.readUInt32LE(base + 16);
       const expHi = data.readUInt32LE(base + 20);
       exp   = expHi * 0x100000000 + expLo;
-      // base+24: expPercent(8d) — skipped
+      // base+24: expPercent(8d) — server-computed percentage within current level (0.0–100.0)
+      const expPct = data.readDoubleLE(base + 24);
+      if (expPct >= 0 && expPct <= 100) this.player.expPct = expPct;
       maxHp = data.readInt32LE(base + 56);
       curHp = data.readInt32LE(base + 60);
       maxMp = data.readInt32LE(base + 64);
