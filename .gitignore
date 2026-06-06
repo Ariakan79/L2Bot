@@ -1,6 +1,5 @@
 node_modules/
 profiles/
-public/data/
 .claude/
 .playwright-mcp/
 CLAUDE.md

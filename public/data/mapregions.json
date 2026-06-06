@@ -1,0 +1,194 @@
+[
+  {
+    "town": "Aden Castle Town",
+    "x": 147971,
+    "y": 25578,
+    "outdoor": true
+  },
+  {
+    "town": "Aerial Cleft",
+    "x": -214030,
+    "y": 244972,
+    "outdoor": false
+  },
+  {
+    "town": "Border of Nightmare",
+    "x": -114616,
+    "y": -153393,
+    "outdoor": false
+  },
+  {
+    "town": "Coliseum",
+    "x": 149488,
+    "y": 46721,
+    "outdoor": false
+  },
+  {
+    "town": "Darkelven Town",
+    "x": 1422,
+    "y": 17814,
+    "outdoor": true
+  },
+  {
+    "town": "Dimensional Rift",
+    "x": -114785,
+    "y": -179864,
+    "outdoor": true
+  },
+  {
+    "town": "Dion Castle Town",
+    "x": 18100,
+    "y": 157159,
+    "outdoor": true
+  },
+  {
+    "town": "Dwarven Town",
+    "x": 116728,
+    "y": -181656,
+    "outdoor": true
+  },
+  {
+    "town": "Elven Town",
+    "x": 43686,
+    "y": 51430,
+    "outdoor": true
+  },
+  {
+    "town": "Fantasy Island",
+    "x": -67848,
+    "y": -58646,
+    "outdoor": true
+  },
+  {
+    "town": "Floran Town",
+    "x": 14016,
+    "y": 175999,
+    "outdoor": true
+  },
+  {
+    "town": "Giran Castle Town",
+    "x": 80236,
+    "y": 147602,
+    "outdoor": true
+  },
+  {
+    "town": "Giran Habor",
+    "x": 47998,
+    "y": 185986,
+    "outdoor": true
+  },
+  {
+    "town": "Gludin Castle Town",
+    "x": -79594,
+    "y": 117882,
+    "outdoor": true
+  },
+  {
+    "town": "Gludio Castle Town",
+    "x": -16389,
+    "y": 124762,
+    "outdoor": true
+  },
+  {
+    "town": "Goddard Town",
+    "x": 146973,
+    "y": -57628,
+    "outdoor": true
+  },
+  {
+    "town": "Heine Town",
+    "x": 108998,
+    "y": 220171,
+    "outdoor": true
+  },
+  {
+    "town": "Hunters Village",
+    "x": 115518,
+    "y": 75523,
+    "outdoor": true
+  },
+  {
+    "town": "Ironcastle Inner Oasis",
+    "x": 9281,
+    "y": 252243,
+    "outdoor": true
+  },
+  {
+    "town": "Orc Town",
+    "x": -44845,
+    "y": -113418,
+    "outdoor": true
+  },
+  {
+    "town": "Oren Castle Town",
+    "x": 78713,
+    "y": 53819,
+    "outdoor": true
+  },
+  {
+    "town": "Primeval Island",
+    "x": 10682,
+    "y": -24052,
+    "outdoor": true
+  },
+  {
+    "town": "Rune Town",
+    "x": 41282,
+    "y": -52213,
+    "outdoor": true
+  },
+  {
+    "town": "Seed of Annihilation",
+    "x": -178256,
+    "y": 153397,
+    "outdoor": false
+  },
+  {
+    "town": "Seed of Destruction",
+    "x": -248373,
+    "y": 250442,
+    "outdoor": false
+  },
+  {
+    "town": "Seed of Infinity",
+    "x": -183285,
+    "y": 205996,
+    "outdoor": false
+  },
+  {
+    "town": "Soul Island",
+    "x": -117567,
+    "y": 46164,
+    "outdoor": true
+  },
+  {
+    "town": "Southern Wasteland",
+    "x": -16633,
+    "y": 209413,
+    "outdoor": true
+  },
+  {
+    "town": "Talking Island Town",
+    "x": -86143,
+    "y": 243093,
+    "outdoor": true
+  },
+  {
+    "town": "The Royal Family's Catacomb",
+    "x": 181312,
+    "y": -80872,
+    "outdoor": false
+  },
+  {
+    "town": "Town of Schuttgart",
+    "x": 86307,
+    "y": -140542,
+    "outdoor": true
+  },
+  {
+    "town": "Union Base Of Kserth",
+    "x": -184480,
+    "y": 242958,
+    "outdoor": true
+  }
+]
