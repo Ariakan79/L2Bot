@@ -353,6 +353,8 @@ class GameClient extends EventEmitter {
     // base+192: paperdollDisplayIds (26 slots × 4 = 104 bytes)
     //           RHAND = index 7 → base+192 + 7×4 = base+220
     // base+296: paperdollAugmentIds (26 slots × 4 = 104 bytes)
+    if (!this.player) this.player = {};
+
     let off = 1;
     const x = data.readInt32LE(off); off += 4;
     const y = data.readInt32LE(off); off += 4;
@@ -392,7 +394,6 @@ class GameClient extends EventEmitter {
       runSpeed = data.readInt32LE(base + 456);
     }
 
-    if (!this.player) this.player = {};
     Object.assign(this.player, { objectId, x, y, z, name });
     if (base + 76 <= data.length) {
       this.player.level        = level;
